@@ -28,6 +28,14 @@ Source and Master are never edited. Output must not overlap either input and
 must not contain existing data. Scan snapshots are checked again before export
 so changes made by code generation or another process require a fresh scan.
 
+When regenerating one model, overwrite its old ARXML files in the selected Source
+set and leave the other models in that set unchanged. Select a single coherent
+set: for the sample layout, use `codegen/ClassicSample` for the assembled set or
+the individual `*_SWC_autosar_rtw` folder when its dependencies exist in Master.
+Selecting the aggregate `codegen` root when it also contains copies in both
+locations is blocked as duplicate definitions. Overwriting files after Scan
+requires scanning again before Apply.
+
 ## Supported changes
 
 - Add a missing `VARIABLE-DATA-PROTOTYPE` to an existing S/R interface.

@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from lxml import etree as ET
 
-from arxml_parser import Dataset, child, value
+from arxml_parser import Dataset, PatcherError, child, value
 from diff_engine import scan
 from patch_engine import apply_patch
 from validator import validate_xsd
@@ -69,6 +69,64 @@ def test_real_generated_definitions_all_three_features(real_data, tmp_path):
     assert all(plan.summary[k] > 0 for k in ["DataElement", "ComSpec", "RunnableAccess"])
     output = apply_patch(plan, tmp_path / "patched", os.getenv("AUTOSAR_XSD"))
     assert scan(output, source).summary["ADD"] == 0
+
+
+@pytest.mark.parametrize("component_name", ["ActuatorAdapter", "Controller", "SensorAdapter"])
+def test_real_single_model_codegen_overwrites_old_files(real_data, tmp_path, component_name):
+    master, generated = real_data
+    master_data, generated_data = Dataset.load(master), Dataset.load(generated)
+    assert not master_data.errors and not generated_data.errors
+    path = f"/Components/{component_name}"
+    if path not in generated_data.objects:
+        pytest.skip(f"Generated sample does not include {component_name}")
+    old_component = master_data.objects[path]
+    new_component = generated_data.objects[path]
+    model_prefix = new_component.file.name.removesuffix("_component.arxml") + "_"
+    source = tmp_path / "architecture-with-overwritten-model"
+    # Begin with the old architecture, then replace the selected model's files in place.
+    for file, document in master_data.documents.items():
+        target = source / file
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(document.original)
+    initial = scan(master, source)
+    assert initial.valid and initial.summary["ADD"] == 0
+    replacements = set()
+    for file, document in generated_data.documents.items():
+        if file.name.startswith(model_prefix):
+            matches = [p for p in master_data.documents if p.name == file.name]
+            assert len(matches) == 1
+            relative = matches[0]
+            (source / relative).write_bytes(document.original)
+            replacements.add(relative)
+    assert old_component.file in replacements
+    for file, document in master_data.documents.items():
+        if file not in replacements:
+            assert (source / file).read_bytes() == document.original
+    plan = scan(master, source)
+    assert plan.valid, plan.report()
+    output = tmp_path / "patched"
+    if plan.operations:
+        # A second overwrite after Scan must invalidate the old plan without exporting.
+        component_file = source / old_component.file
+        newer_bytes = component_file.read_bytes()
+        component_file.write_bytes(master_data.documents[old_component.file].original)
+        with pytest.raises(PatcherError, match="changed after scan"):
+            apply_patch(plan, output)
+        assert not output.exists()
+        component_file.write_bytes(newer_bytes)
+        fresh = scan(master, source)
+        apply_patch(fresh, output, os.getenv("AUTOSAR_XSD"))
+        changed = {Path(op.record.TargetFile) for op in fresh.operations}
+        assert changed <= replacements
+        for file, document in master_data.documents.items():
+            if file not in changed:
+                assert (output / file).read_bytes() == document.original
+        repeated = scan(output, source)
+        assert repeated.valid and repeated.summary["ADD"] == 0
+    else:
+        assert not output.exists()  # Unchanged generated models need no patch.
+    assert Dataset.load(master).manifest() == master_data.manifest()
+    assert Dataset.load(generated).manifest() == generated_data.manifest()
 
 
 def test_profile_order_matches_installed_xsd():
