@@ -145,6 +145,13 @@ def check_access(
     )
     interface_ref = child(port.node, ref_name)
     interface = (interface_ref.text or "").strip() if interface_ref is not None else ""
+    interface_object = available.get(interface)
+    if (
+        interface_object is None
+        or tag(interface_object.node) != "SENDER-RECEIVER-INTERFACE"
+        or interface_ref.get("DEST") != "SENDER-RECEIVER-INTERFACE"
+    ):
+        return "Access requires a port referencing an existing SENDER-RECEIVER-INTERFACE"
     if target_path.rsplit("/", 1)[0] != interface:
         return "Access data element does not belong to the port's S/R interface"
     return None

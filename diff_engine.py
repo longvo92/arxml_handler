@@ -113,6 +113,8 @@ def compare(master: Dataset, source: Dataset) -> Plan:
             return emit(category, path, "UNSUPPORTED", src, target, "Missing SHORT-NAME")
         if existing:
             if len(existing) == 1 and semantic(existing[0]) == semantic(node):
+                if extra_error:
+                    return emit(category, path, "UNSUPPORTED", src, target, extra_error)
                 return emit(category, path, "EXISTS", src, target, "Already defined equivalently")
             return emit(
                 category,
@@ -332,17 +334,14 @@ def compare(master: Dataset, source: Dataset) -> Plan:
                     "Unrecognized node in S/R access container",
                 )
             if mode.startswith("DATA-") and mode not in ACCESS_CONTAINERS and not nodes:
-                if target is None or not any(
-                    semantic(container) == semantic(n) for n in children(target.node, mode)
-                ):
-                    emit(
-                        "RunnableAccess",
-                        f"{src.path}/{mode}",
-                        "UNSUPPORTED",
-                        src,
-                        target,
-                        "Unrecognized data access mode",
-                    )
+                emit(
+                    "RunnableAccess",
+                    f"{src.path}/{mode}",
+                    "UNSUPPORTED",
+                    src,
+                    target,
+                    "Unrecognized data access mode",
+                )
             for node in nodes:
                 path = src.path + "/" + value(node, "SHORT-NAME")
                 if target is None or tag(target.node) != "RUNNABLE-ENTITY":
@@ -362,15 +361,23 @@ def compare(master: Dataset, source: Dataset) -> Plan:
                 logic = (mode, tuple((r.text or "").strip() for r in port_refs + data_refs))
                 same_name = [n for n in old_nodes if value(n, "SHORT-NAME") == name]
                 if mode not in ACCESS_CONTAINERS:
-                    if len(same_name) != 1 or semantic(same_name[0]) != semantic(node):
-                        emit(
-                            "RunnableAccess",
-                            path,
-                            "UNSUPPORTED",
-                            src,
-                            target,
-                            "Access container outside S/R allowlist",
-                        )
+                    # Existing known local roles may coexist, but an unknown mode
+                    # never inherits support from an identical VARIABLE-ACCESS node.
+                    if (
+                        mode in {"READ-LOCAL-VARIABLES", "WRITTEN-LOCAL-VARIABLES"}
+                        and len(same_name) == 1
+                        and tag(same_name[0].getparent()) == mode
+                        and semantic(same_name[0]) == semantic(node)
+                    ):
+                        continue
+                    emit(
+                        "RunnableAccess",
+                        path,
+                        "UNSUPPORTED",
+                        src,
+                        target,
+                        "Access container outside S/R allowlist",
+                    )
                     continue
                 if logic in seen_logic:
                     emit(

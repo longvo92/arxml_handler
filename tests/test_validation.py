@@ -193,3 +193,85 @@ def test_created_interface_container_order(inputs):
     assert interface.index(child(interface, "DATA-ELEMENTS")) < interface.index(
         child(interface, "INVALIDATION-POLICYS")
     )
+
+
+@pytest.mark.parametrize(
+    "direction,mode", [("R", "DATA-READ-ACCESSS"), ("P", "DATA-WRITE-ACCESSS")]
+)
+@pytest.mark.parametrize("existing", [False, True])
+def test_nv_data_access_is_outside_sr_scope(inputs, direction, mode, existing):
+    point = access(mode, direction)
+    master, source, output = inputs(
+        master_elements=element(),
+        source_elements=element(),
+        master_component=component(accesses=point if existing else ""),
+        source_component=component(accesses=point),
+    )
+    # NV data is valid AUTOSAR, but is explicitly outside this patcher's S/R scope.
+    for folder in (master, source):
+        for file in folder.rglob("*"):
+            if file.is_file():
+                file.write_text(
+                    file.read_text()
+                    .replace("SENDER-RECEIVER-INTERFACE", "NV-DATA-INTERFACE")
+                    .replace("DATA-ELEMENTS", "NV-DATAS"),
+                    encoding="utf-8",
+                )
+    plan = scan(master, source)
+    rows = [r for r in plan.records if r.Category == "RunnableAccess"]
+    assert len(rows) == 1 and rows[0].Action == "UNSUPPORTED"
+    assert "SENDER-RECEIVER-INTERFACE" in rows[0].Reason
+    with pytest.raises(PatcherError, match="Preflight blocked"):
+        apply_patch(plan, output)
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("master_mode", ["DATA-READ-ACCESSS", "DATA-UNKNOWN-ACCESSS"])
+def test_unknown_mode_blocks_other_additions_even_with_identical_access(inputs, master_mode):
+    master, source, output = inputs(
+        master_elements=element("Old"),
+        source_elements=element("Old") + element(),
+        master_component=component(accesses=access(master_mode, name="Old")),
+        source_component=component(accesses=access("DATA-UNKNOWN-ACCESSS", name="Old")),
+    )
+    plan = scan(master, source)
+    assert plan.summary["DataElement"] == 1
+    assert plan.summary["UNSUPPORTED"] == 1
+    assert not plan.valid
+    with pytest.raises(PatcherError, match="Preflight blocked"):
+        apply_patch(plan, output)
+    assert not output.exists()
+
+
+def test_empty_unknown_data_mode_is_not_silently_accepted(inputs):
+    unknown = "<DATA-UNKNOWN-ACCESSS/>"
+    master, source, output = inputs(
+        master_elements=element("Old"),
+        source_elements=element("Old") + element(),
+        master_component=component(accesses=unknown),
+        source_component=component(accesses=unknown),
+    )
+    plan = scan(master, source)
+    assert plan.summary["UNSUPPORTED"] == 1
+    with pytest.raises(PatcherError):
+        apply_patch(plan, output)
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("mode", ["READ-LOCAL-VARIABLES", "WRITTEN-LOCAL-VARIABLES"])
+def test_unchanged_known_local_access_does_not_block_sr_patch(inputs, mode):
+    local = (
+        f"<{mode}><VARIABLE-ACCESS><SHORT-NAME>Local</SHORT-NAME><ACCESSED-VARIABLE>"
+        '<LOCAL-VARIABLE-REF DEST="VARIABLE-DATA-PROTOTYPE">/Pkg/Swc/Behavior/Local'
+        f"</LOCAL-VARIABLE-REF></ACCESSED-VARIABLE></VARIABLE-ACCESS></{mode}>"
+    )
+    master, source, output = inputs(
+        master_elements=element("Old"),
+        source_elements=element("Old") + element(),
+        master_component=component(accesses=local),
+        source_component=component(accesses=local),
+    )
+    plan = scan(master, source)
+    assert plan.valid
+    apply_patch(plan, output)
+    assert scan(output, source).summary["ADD"] == 0

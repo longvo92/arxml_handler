@@ -53,6 +53,12 @@ No existing definition is updated, renamed or deleted; timing, events, symbols,
 connectors, implementation and generated C are left intact. Unrelated objects
 are not synchronized. C/S and local-variable access are never added.
 
+Runnable accesses require a port mapped to an existing Sender-Receiver interface;
+NV-Data interfaces are outside scope even when accepted by the AUTOSAR XSD.
+Unknown data access modes always block the patch, including when their access
+node matches Master. Unchanged accesses in the known read/write local-variable
+containers may coexist with the supported S/R changes.
+
 ## Output and validation
 
 Output contains the Master **ARXML set**, retaining relative paths, plus the two
