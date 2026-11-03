@@ -1,0 +1,195 @@
+import pytest
+from conftest import DATATYPE, access, component, comspec, document, element
+
+from arxml_parser import NS, Dataset, PatcherError, child, tag
+from diff_engine import scan
+from patch_engine import apply_patch
+from validator import check_order
+
+
+@pytest.mark.parametrize(
+    "mode,direction",
+    [
+        ("DATA-READ-ACCESSS", "R"),
+        ("DATA-RECEIVE-POINT-BY-ARGUMENTS", "R"),
+        ("DATA-RECEIVE-POINT-BY-VALUES", "R"),
+        ("DATA-SEND-POINTS", "P"),
+        ("DATA-WRITE-ACCESSS", "P"),
+    ],
+)
+def test_created_access_containers_precede_symbol(inputs, mode, direction):
+    master, source, output = inputs(
+        master_elements=element(),
+        source_elements=element(),
+        master_component=component(),
+        source_component=component(accesses=access(mode, direction)),
+    )
+    apply_patch(scan(master, source), output)
+    runnable = Dataset.load(output).objects["/Pkg/Swc/Behavior/Run"].node
+    names = [tag(n) for n in runnable]
+    assert names.index(mode) < names.index("SYMBOL")
+    assert check_order(runnable) is None
+
+
+def test_wrong_dest_is_conflict(inputs):
+    master, source, _ = inputs(
+        source_elements=element().replace('DEST="APPLICATION-PRIMITIVE-DATA-TYPE"', 'DEST="UNIT"')
+    )
+    assert scan(master, source).summary["CONFLICT"] == 1
+
+
+def test_transitive_type_dependency_is_required(inputs):
+    dtype = DATATYPE.replace(
+        "</APPLICATION-PRIMITIVE-DATA-TYPE>",
+        (
+            "<SW-DATA-DEF-PROPS><SW-DATA-DEF-PROPS-VARIANTS>"
+            '<SW-DATA-DEF-PROPS-CONDITIONAL><COMPU-METHOD-REF DEST="COMPU-METHOD">'
+            "/Pkg/MissingCompu</COMPU-METHOD-REF></SW-DATA-DEF-PROPS-CONDITIONAL>"
+            "</SW-DATA-DEF-PROPS-VARIANTS></SW-DATA-DEF-PROPS></APPLICATION-PRIMITIVE-DATA-TYPE>"
+        ),
+    )
+    master, source, _ = inputs(source_elements=element(), datatype=dtype)
+    plan = scan(master, source)
+    assert plan.summary["UNSUPPORTED"] == 1
+    assert "MissingCompu" in plan.records[0].Reason
+
+
+def test_same_type_path_with_different_definition_is_conflict(inputs):
+    master, source, _ = inputs(source_elements=element())
+    (source / "types.arxml").write_text(document(DATATYPE.replace("VALUE", "BOOLEAN")))
+    assert scan(master, source).summary["CONFLICT"] == 1
+
+
+def test_access_cannot_reference_other_component(inputs):
+    master, source, _ = inputs(
+        master_elements=element(),
+        source_elements=element(),
+        master_component=component() + component().replace("Swc", "Other"),
+        source_component=component(accesses=access(port="/Pkg/Other/RPort")),
+    )
+    plan = scan(master, source)
+    assert plan.summary["UNSUPPORTED"] == 1
+    assert "outside" in plan.records[-1].Reason
+
+
+def test_access_and_comspec_must_use_mapped_interface(inputs):
+    master, source, _ = inputs(
+        master_elements=element(),
+        source_elements=element(),
+        master_component=component(),
+        source_component=component(rcom=comspec().replace("/Pkg/If/New", "/Pkg/Other/New")),
+    )
+    assert scan(master, source).summary["UNSUPPORTED"] == 1
+
+
+def test_interface_mapping_change_is_conflict(inputs):
+    master, source, _ = inputs(
+        master_elements=element(),
+        source_elements=element(),
+        master_component=component().replace("/Pkg/If</REQUIRED", "/Pkg/Other</REQUIRED"),
+        source_component=component(rcom=comspec()),
+    )
+    assert scan(master, source).summary["CONFLICT"] == 1
+
+
+@pytest.mark.parametrize("side", ["master", "source"])
+def test_invalid_port_interface_dest_blocks_comspec(inputs, side):
+    master, source, output = inputs(
+        master_elements=element(),
+        source_elements=element(),
+        master_component=component(),
+        source_component=component(rcom=comspec()),
+    )
+    file = (master if side == "master" else source) / "component.arxml"
+    file.write_text(
+        file.read_text().replace(
+            'DEST="SENDER-RECEIVER-INTERFACE"', 'DEST="CLIENT-SERVER-INTERFACE"'
+        )
+    )
+    plan = scan(master, source)
+    assert not plan.valid
+    assert any("DEST" in r.Reason for r in plan.records)
+    with pytest.raises(PatcherError):
+        apply_patch(plan, output)
+    assert not output.exists()
+
+
+def test_no_new_interface_is_created(inputs):
+    master, source, output = inputs(source_elements=element())
+    file = source / "different-names" / "source.ARXML"
+    file.write_text(
+        file.read_text().replace("<SHORT-NAME>If</SHORT-NAME>", "<SHORT-NAME>NewIf</SHORT-NAME>")
+    )
+    plan = scan(master, source)
+    assert plan.summary["UNSUPPORTED"] == 1
+    with pytest.raises(PatcherError):
+        apply_patch(plan, output)
+
+
+def test_unknown_parent_child_blocks_guessed_order(inputs):
+    master, source, _ = inputs(
+        master_elements=element(),
+        source_elements=element(),
+        master_component=component().replace("<SYMBOL>", "<UNKNOWN/><SYMBOL>"),
+        source_component=component(accesses=access()),
+    )
+    assert scan(master, source).summary["UNSUPPORTED"] == 1
+
+
+def test_existing_duplicate_comspec_blocks_export(inputs):
+    master, source, _ = inputs(
+        master_elements=element(),
+        source_elements=element(),
+        master_component=component(rcom=comspec() * 2),
+        source_component=component(rcom=comspec()),
+    )
+    assert scan(master, source).summary["CONFLICT"] == 1
+
+
+def test_source_duplicate_logical_access_blocks_export(inputs):
+    content = access() + access(short_name="DifferentName")
+    # Merge duplicate container so the logical identity check is exercised.
+    content = content.replace("</DATA-READ-ACCESSS><DATA-READ-ACCESSS>", "")
+    master, source, _ = inputs(
+        master_elements=element(),
+        source_elements=element(),
+        master_component=component(),
+        source_component=component(accesses=content),
+    )
+    assert scan(master, source).summary["CONFLICT"] == 1
+
+
+def test_optional_xsd_is_enforced(inputs, tmp_path):
+    master, source, output = inputs(source_elements=element())
+    xsd = tmp_path / "reject.xsd"
+    xsd.write_text(
+        f'<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" '
+        f'targetNamespace="{NS}"><xs:element name="AUTOSAR" type="xs:string"/>'
+        "</xs:schema>"
+    )
+    with pytest.raises(PatcherError, match="XSD validation failed"):
+        apply_patch(scan(master, source), output, xsd)
+    assert not output.exists()
+
+
+def test_short_names_in_different_behaviors_never_match(inputs):
+    master, source, _ = inputs(
+        master_elements=element(),
+        source_elements=element(),
+        master_component=component(),
+        source_component=component(accesses=access()).replace("Behavior", "AnotherBehavior"),
+    )
+    assert scan(master, source).summary["UNSUPPORTED"] == 1
+
+
+def test_created_interface_container_order(inputs):
+    master, source, output = inputs(source_elements=element())
+    path = master / "interfaces.arxml"
+    path.write_text(
+        path.read_text().replace("<DATA-ELEMENTS></DATA-ELEMENTS>", "<INVALIDATION-POLICYS/>")
+    )
+    apply_patch(scan(master, source), output)
+    interface = Dataset.load(output).objects["/Pkg/If"].node
+    assert interface.index(child(interface, "DATA-ELEMENTS")) < interface.index(
+        child(interface, "INVALIDATION-POLICYS")
+    )
