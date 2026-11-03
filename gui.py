@@ -20,7 +20,7 @@ class Application(ttk.Frame):
         self.last_error = ""
         self.busy = False
         self.messages: queue.Queue = queue.Queue()
-        self.paths = {name: tk.StringVar() for name in ["Master", "Source", "Output", "XSD"]}
+        self.paths = {name: tk.StringVar() for name in ["Master", "Source", "XSD"]}
         self.controls = []
         self.rows = {}
         self.pack(fill="both", expand=True)
@@ -28,20 +28,18 @@ class Application(ttk.Frame):
         root.geometry("1150x760")
         root.minsize(850, 600)
         self.columnconfigure(1, weight=1)
-        self.rowconfigure(7, weight=1)
+        self.rowconfigure(6, weight=1)
         ttk.Label(self, text="AUTOSAR S/R Incremental Patcher", font=("Segoe UI", 17, "bold")).grid(
             row=0, column=0, columnspan=3, sticky="w", pady=(0, 6)
         )
         ttk.Label(
             self,
             text="Add generated data elements, ComSpecs and runnable accesses. "
-            "Original input files are preserved.",
+            "Apply updates Master in place and creates an automatic backup. Source is read-only.",
         ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 14))
         for row, name in enumerate(self.paths, start=2):
             label = (
-                f"{name} ARXML Folder"
-                if name in {"Master", "Source"}
-                else ("Output Folder" if name == "Output" else "XSD File (optional)")
+                f"{name} ARXML Folder" if name in {"Master", "Source"} else "XSD File (optional)"
             )
             ttk.Label(self, text=label).grid(row=row, column=0, sticky="w", padx=(0, 12), pady=4)
             entry = ttk.Entry(self, textvariable=self.paths[name])
@@ -50,16 +48,16 @@ class Application(ttk.Frame):
             button.grid(row=row, column=2, padx=(8, 0), pady=4)
             self.controls.extend([entry, button])
         actions = ttk.Frame(self)
-        actions.grid(row=6, column=0, columnspan=3, sticky="ew", pady=12)
+        actions.grid(row=5, column=0, columnspan=3, sticky="ew", pady=12)
         self.scan_button = ttk.Button(actions, text="Scan & Compare", command=self.start_scan)
-        self.apply_button = ttk.Button(actions, text="Apply Patch", command=self.start_apply)
+        self.apply_button = ttk.Button(actions, text="Apply to Master", command=self.start_apply)
         self.report_button = ttk.Button(actions, text="Save Report…", command=self.start_report)
         for button in [self.scan_button, self.apply_button, self.report_button]:
             button.pack(side="left", padx=(0, 8))
         self.progress = ttk.Progressbar(actions, mode="indeterminate", length=180)
         self.progress.pack(side="right")
         table = ttk.Frame(self)
-        table.grid(row=7, column=0, columnspan=3, sticky="nsew")
+        table.grid(row=6, column=0, columnspan=3, sticky="nsew")
         table.columnconfigure(0, weight=1)
         table.rowconfigure(0, weight=1)
         self.tree = ttk.Treeview(
@@ -87,18 +85,25 @@ class Application(ttk.Frame):
         self.tree.bind("<<TreeviewSelect>>", self.show_detail)
         self.summary = tk.StringVar(value="Select Master and Source folders, then scan.")
         ttk.Label(self, textvariable=self.summary, wraplength=1050).grid(
-            row=8, column=0, columnspan=3, sticky="w", pady=(12, 6)
+            row=7, column=0, columnspan=3, sticky="w", pady=(12, 6)
         )
         self.detail = tk.Text(self, height=5, wrap="word", state="disabled", font=("Consolas", 10))
-        self.detail.grid(row=9, column=0, columnspan=3, sticky="ew")
+        self.detail.grid(row=8, column=0, columnspan=3, sticky="ew")
         self.status = tk.StringVar(value="Ready — supported profile: AUTOSAR_00047")
         ttk.Label(self, textvariable=self.status, wraplength=1050).grid(
-            row=10, column=0, columnspan=3, sticky="w", pady=(8, 0)
+            row=9, column=0, columnspan=3, sticky="w", pady=(8, 0)
         )
         for name in ["Master", "Source"]:
             self.paths[name].trace_add("write", self.invalidate)
         self._buttons()
         self.root.after(100, self.poll)
+        self.root.protocol("WM_DELETE_WINDOW", self.close)
+
+    def close(self):
+        if self.busy:
+            self.status.set("Please wait for the current operation to finish before closing.")
+        else:
+            self.root.destroy()
 
     def _buttons(self):
         self.scan_button.configure(state="disabled" if self.busy else "normal")
@@ -118,7 +123,7 @@ class Application(ttk.Frame):
         selected = (
             filedialog.askopenfilename(title="Select AUTOSAR XSD", filetypes=[("XSD", "*.xsd")])
             if name == "XSD"
-            else filedialog.askdirectory(title=f"Select {name} folder", mustexist=name != "Output")
+            else filedialog.askdirectory(title=f"Select {name} folder", mustexist=True)
         )
         if selected:
             self.paths[name].set(selected)
@@ -141,7 +146,7 @@ class Application(ttk.Frame):
             except Exception:
                 self.messages.put((action, None, traceback.format_exc()))
 
-        threading.Thread(target=worker, daemon=True).start()
+        threading.Thread(target=worker, daemon=False).start()
 
     def start_scan(self):
         master, source = (self.paths[n].get().strip() for n in ["Master", "Source"])
@@ -156,9 +161,8 @@ class Application(ttk.Frame):
         plan = self.plan
         if not plan or not plan.valid or not plan.operations:
             return
-        output = self.paths["Output"].get().strip()
         xsd = self.paths["XSD"].get().strip() or None
-        self.run_worker("apply", lambda: apply_patch(plan, output, xsd))
+        self.run_worker("apply", lambda: apply_patch(plan, xsd))
 
     def start_report(self):
         folder = filedialog.askdirectory(
@@ -187,13 +191,16 @@ class Application(ttk.Frame):
             self.plan = result
             self.display_plan()
         elif action == "apply":
-            self.status.set(f"Patch exported: {result}")
+            self.plan = None
+            self.status.set(f"Master updated: {result.master_folder}. Scan again to refresh.")
+            self.summary.set(f"Updated {len(result.changed_files)} Master file(s).")
             self.set_detail(
-                f"Output: {result}\nReports: patch_report.txt and patch_report.json\n"
-                "Post-patch references, structure, isolation and idempotency passed."
+                f"Master: {result.master_folder}\nBackup and reports: {result.backup_folder}\n"
+                "References, structure, isolation and idempotency passed."
             )
             messagebox.showinfo(
-                "Patch complete", f"Validated output and reports saved to:\n{result}"
+                "Patch complete",
+                f"Master updated in place.\nBackup and reports:\n{result.backup_folder}",
             )
         else:
             self.status.set(f"Reports saved: {result}")

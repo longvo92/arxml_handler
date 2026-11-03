@@ -18,17 +18,14 @@ def main(argv=None) -> int:
         launch()
         return 0
     parser = argparse.ArgumentParser(description="AUTOSAR S/R Incremental Patcher (00047)")
-    parser.add_argument("--master", required=True, help="Master ARXML folder (read-only)")
+    parser.add_argument("--master", required=True, help="Existing Master ARXML folder to patch")
     parser.add_argument("--source", required=True, help="Source ARXML folder (read-only)")
-    parser.add_argument("--apply", action="store_true", help="Apply the validated plan")
-    parser.add_argument("--output", help="New or empty output folder; required with --apply")
+    parser.add_argument("--apply", action="store_true", help="Patch Master in place with backup")
     parser.add_argument("--report", help="Optional separate new/empty report-only folder")
     parser.add_argument("--xsd", help="Optional AUTOSAR XSD with local include/import dependencies")
     args = parser.parse_args(argv)
-    if args.apply and not args.output:
-        parser.error("--apply requires --output")
     if args.xsd and not args.apply:
-        parser.error("--xsd validates the output and requires --apply")
+        parser.error("--xsd validates the patched Master and requires --apply")
     plan = scan(args.master, args.source)
     failure = ""
     outcome = "scanned" if plan.valid else "blocked"
@@ -40,9 +37,10 @@ def main(argv=None) -> int:
             if row.Action != "EXISTS":
                 print(f"[{row.Action}] {row.Category} {row.ObjectPath}: {row.Reason}")
         if args.apply:
-            path = apply_patch(plan, args.output, args.xsd)
+            result = apply_patch(plan, args.xsd)
             outcome = "patched"
-            print(f"Validated output: {path}")
+            print(f"Master updated: {result.master_folder}")
+            print(f"Backup and reports: {result.backup_folder}")
     except (PatcherError, OSError) as exc:
         failure = str(exc)
         outcome = "failed"

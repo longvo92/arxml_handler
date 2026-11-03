@@ -6,6 +6,7 @@ import pytest
 from conftest import element
 
 import gui
+from diff_engine import scan
 
 
 @pytest.fixture(scope="module")
@@ -47,7 +48,7 @@ def test_gui_scan_apply_and_stale_input(inputs, app):
     master, source, output = inputs(source_elements=element())
     application, messages = app
     assert str(application.apply_button["state"]) == "disabled"
-    for name, path in [("Master", master), ("Source", source), ("Output", output)]:
+    for name, path in [("Master", master), ("Source", source)]:
         application.paths[name].set(str(path))
     application.scan_button.invoke()
     settle(application)
@@ -57,7 +58,10 @@ def test_gui_scan_apply_and_stale_input(inputs, app):
     assert not output.exists()
     application.apply_button.invoke()
     settle(application)
-    assert (output / "patch_report.json").exists()
+    assert "Output" not in application.paths
+    assert scan(master, source).summary["ADD"] == 0
+    assert str(application.apply_button["state"]) == "disabled"
+    assert list((master.parent / ".arxml-patcher-backups").glob("*/patch_report.json"))
     assert messages[-1][0] == "Patch complete"
     application.paths["Source"].set(str(source / "changed"))
     assert str(application.apply_button["state"]) == "disabled"
@@ -78,3 +82,12 @@ def test_gui_blocks_invalid_preflight_and_can_save_report(inputs, app, monkeypat
     settle(application)
     assert (report / "patch_report.json").exists()
     assert not output.exists()
+
+
+def test_gui_prevents_normal_close_during_write(app):
+    application, _ = app
+    application.busy = True
+    application.close()
+    assert application.root.winfo_exists()
+    assert "wait" in application.status.get()
+    application.busy = False

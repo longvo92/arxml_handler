@@ -1,5 +1,6 @@
 from conftest import element
 
+from diff_engine import scan
 from main import main
 
 
@@ -20,15 +21,14 @@ def test_cli_apply_and_report(inputs):
                 "--source",
                 str(source),
                 "--apply",
-                "--output",
-                str(output),
                 "--report",
                 str(report),
             ]
         )
         == 0
     )
-    assert (output / "interfaces.arxml").exists()
+    assert scan(master, source).summary["ADD"] == 0
+    assert not output.exists()
     assert (report / "patch_report.json").exists()
 
 
@@ -43,8 +43,6 @@ def test_blocked_cli_returns_two_and_exports_only_reports(inputs):
                 "--source",
                 str(source),
                 "--apply",
-                "--output",
-                str(output),
                 "--report",
                 str(report),
             ]

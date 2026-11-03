@@ -44,7 +44,11 @@ Child order and meaningful text do. No implicit/explicit conversion is performed
 References are resolved across the Master set plus accepted new data elements.
 Dependency definitions such as datatypes and constants must already exist; if
 also supplied by Source, their definitions must agree with Master. Missing or
-incompatible dependencies block export. Unrelated existing references are not
+incompatible dependencies block Apply. Unrelated existing references are not
 claimed to be fully integration-validated. Optional user-provided XSD validation
 checks all resulting documents; structural/reference checks alone are not full
 AUTOSAR schema or RTE/BSW integration validation.
+
+Apply validates the patched set in memory, then replaces only changed files in
+Master with an automatic backup and rollback journal outside Master. Source stays
+read-only. See the README for interruption recovery and the CLI/API migration.
