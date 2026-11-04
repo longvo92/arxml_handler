@@ -1,10 +1,13 @@
+import json
+import os
 import sys
 import time
 import tkinter as tk
 
 import pytest
-from conftest import element
+from conftest import component, comspec, element
 
+import file_transaction
 import gui
 from arxml_parser import Dataset
 from diff_engine import scan
@@ -45,11 +48,15 @@ def settle(app):
     assert not app.busy
 
 
-def test_gui_scan_apply_and_stale_input(inputs, app):
+def test_gui_scan_apply_and_stale_input(inputs, app, monkeypatch):
     existing = element("Old")
     master, source, output = inputs(master_elements=existing, source_elements=existing + element())
     application, messages = app
+    target = master / "interfaces.arxml"
+    os.utime(target, ns=(1_650_000_000_123_456_700, 1_650_000_000_123_456_700))
+    before = (target.read_bytes(), target.stat().st_mtime_ns)
     assert str(application.apply_button["state"]) == "disabled"
+    assert str(application.revert_button["state"]) == "disabled"
     for name, path in [("Master", master), ("Source", source)]:
         application.paths[name].set(str(path))
     application.scan_button.invoke()
@@ -69,7 +76,9 @@ def test_gui_scan_apply_and_stale_input(inputs, app):
     assert "Output" not in application.paths
     assert scan(master, source).summary["ADD"] == 0
     assert str(application.apply_button["state"]) == "disabled"
-    assert list((master.parent / ".arxml-patcher-backups").glob("*/patch_report.json"))
+    assert not (master.parent / ".arxml-patcher-backups").exists()
+    assert str(application.revert_button["state"]) == "normal"
+    assert str(application.report_button["state"]) == "normal"
     assert messages[-1][0] == "Patch complete"
     application.scan_button.invoke()
     settle(application)
@@ -84,6 +93,24 @@ def test_gui_scan_apply_and_stale_input(inputs, app):
     assert str(application.apply_button["state"]) == "disabled"
     application.paths["Source"].set(str(source / "changed"))
     assert str(application.apply_button["state"]) == "disabled"
+    assert str(application.revert_button["state"]) == "normal"
+    application.paths["Master"].set(str(master.parent / "other"))
+    assert str(application.revert_button["state"]) == "disabled"
+    application.paths["Master"].set(str(master))
+    assert str(application.revert_button["state"]) == "normal"
+    application.revert_button.invoke()
+    settle(application)
+    assert (target.read_bytes(), target.stat().st_mtime_ns) == before
+    assert str(application.revert_button["state"]) == "disabled"
+    assert messages[-1][0] == "Revert complete"
+    report = master.parent / "revert-report"
+    monkeypatch.setattr(gui.filedialog, "askdirectory", lambda **kw: str(report))
+    application.report_button.invoke()
+    settle(application)
+    data = json.loads((report / "patch_report.json").read_text(encoding="utf-8"))
+    assert data["outcome"] == "reverted"
+    assert not data["revert_available"]
+    assert data["post_revert_validation"]["original_mtime"]
 
 
 @pytest.mark.parametrize("addition", ["", element()])
@@ -144,3 +171,41 @@ def test_gui_uuid_reassignment_preview_matches_apply(inputs, app):
     patched = Dataset.load(master)
     assert patched.objects["/Pkg/If/Old"].node.get("UUID") == identifier
     assert patched.objects["/Pkg/If/New"].node.get("UUID") == change.NewUUID
+
+
+def test_gui_retains_partial_apply_for_recovery(inputs, app, monkeypatch):
+    master, source, _ = inputs(
+        source_elements=element(),
+        master_component=component(),
+        source_component=component(rcom=comspec()),
+    )
+    before = Dataset.load(master).manifest()
+    application, messages = app
+    application.paths["Master"].set(str(master))
+    application.paths["Source"].set(str(source))
+    application.scan_button.invoke()
+    settle(application)
+    replace = file_transaction.replace_file
+    writes = 0
+
+    def fail(path, data):
+        nonlocal writes
+        writes += 1
+        if writes >= 2:
+            raise OSError("File locked")
+        replace(path, data)
+
+    monkeypatch.setattr(file_transaction, "replace_file", fail)
+    application.apply_button.invoke()
+    settle(application)
+    assert application.undo_result.state == "recovery_required"
+    assert str(application.revert_button["state"]) == "normal"
+    assert str(application.apply_button["state"]) == "disabled"
+    assert messages[-1][0] == "Operation failed"
+    application.close()
+    assert "Recovery is incomplete" in application.status.get()
+    monkeypatch.setattr(file_transaction, "replace_file", replace)
+    application.revert_button.invoke()
+    settle(application)
+    assert Dataset.load(master).manifest() == before
+    assert messages[-1][0] == "Revert complete"

@@ -62,6 +62,9 @@ claimed to be fully integration-validated. Optional user-provided XSD validation
 checks all resulting documents; structural/reference checks alone are not full
 AUTOSAR schema or RTE/BSW integration validation.
 
-Apply validates the patched set in memory, then replaces only changed files in
-Master with an automatic backup and rollback journal outside Master. Source stays
-read-only. See the README for interruption recovery and the CLI/API migration.
+Apply validates the patched set in memory, then replaces only changed Master files.
+Original bytes, modes and modification timestamps are retained in RAM for session
+Revert. Revert verifies all changed files before restoring original bytes and times.
+Ordinary failures roll back the current operation, and incomplete recovery retains
+its result in memory for retry. Reports are exported explicitly. Source stays
+read-only. See the README for session lifetime, interruption handling and API migration.

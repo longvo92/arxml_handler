@@ -6,10 +6,12 @@ import queue
 import threading
 import tkinter as tk
 import traceback
+from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from diff_engine import Plan, scan
-from patch_engine import apply_patch, save_report
+from file_transaction import PatchResult, TransactionError
+from patch_engine import apply_patch, revert_patch, save_report
 
 
 class Application(ttk.Frame):
@@ -17,6 +19,8 @@ class Application(ttk.Frame):
         super().__init__(root, padding=16)
         self.root = root
         self.plan: Plan | None = None
+        self.undo_result: PatchResult | None = None
+        self.report_target: Plan | PatchResult | None = None
         self.last_error = ""
         self.busy = False
         self.messages: queue.Queue = queue.Queue()
@@ -35,7 +39,7 @@ class Application(ttk.Frame):
         ttk.Label(
             self,
             text="Add generated data elements, ComSpecs and runnable accesses. "
-            "Apply updates Master in place and creates an automatic backup. Source is read-only.",
+            "Revert Last Apply restores original files and modification times during this session.",
         ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 14))
         for row, name in enumerate(self.paths, start=2):
             label = (
@@ -51,8 +55,11 @@ class Application(ttk.Frame):
         actions.grid(row=5, column=0, columnspan=3, sticky="ew", pady=12)
         self.scan_button = ttk.Button(actions, text="Scan & Compare", command=self.start_scan)
         self.apply_button = ttk.Button(actions, text="Apply to Master", command=self.start_apply)
+        self.revert_button = ttk.Button(
+            actions, text="Revert Last Apply", command=self.start_revert
+        )
         self.report_button = ttk.Button(actions, text="Save Report…", command=self.start_report)
-        for button in [self.scan_button, self.apply_button, self.report_button]:
+        for button in [self.scan_button, self.apply_button, self.revert_button, self.report_button]:
             button.pack(side="left", padx=(0, 8))
         self.progress = ttk.Progressbar(actions, mode="indeterminate", length=180)
         self.progress.pack(side="right")
@@ -102,19 +109,42 @@ class Application(ttk.Frame):
     def close(self):
         if self.busy:
             self.status.set("Please wait for the current operation to finish before closing.")
+        elif self.undo_result and self.undo_result.state == "recovery_required":
+            self.status.set("Recovery is incomplete. Use Revert Last Apply before closing.")
         else:
             self.root.destroy()
 
     def _buttons(self):
         self.scan_button.configure(state="disabled" if self.busy else "normal")
         ready = self.plan is not None and self.plan.valid and bool(self.plan.operations)
+        recovery = self.undo_result is not None and self.undo_result.state == "recovery_required"
+        ready = ready and not recovery
         self.apply_button.configure(state="normal" if ready and not self.busy else "disabled")
-        self.report_button.configure(state="normal" if self.plan and not self.busy else "disabled")
+        can_revert = (
+            self.undo_result is not None
+            and self.undo_result.can_revert
+            and self.selected_master_matches_undo()
+        )
+        self.revert_button.configure(state="normal" if can_revert and not self.busy else "disabled")
+        self.report_button.configure(
+            state="normal" if self.report_target and not self.busy else "disabled"
+        )
         for control in self.controls:
             control.configure(state="disabled" if self.busy else "normal")
 
+    def selected_master_matches_undo(self):
+        try:
+            return (
+                self.undo_result is not None
+                and Path(self.paths["Master"].get()).expanduser().resolve()
+                == self.undo_result.master_folder
+            )
+        except (OSError, ValueError, RuntimeError):
+            return False
+
     def invalidate(self, *_):
         self.plan = None
+        self.report_target = None
         self.last_error = ""
         self.status.set("Inputs changed — scan again.")
         self._buttons()
@@ -136,6 +166,7 @@ class Application(ttk.Frame):
             {
                 "scan": "Scanning ARXML…",
                 "apply": "Patching and validating…",
+                "revert": "Restoring original files and modification times…",
                 "report": "Saving report…",
             }[action]
         )
@@ -143,6 +174,8 @@ class Application(ttk.Frame):
         def worker():
             try:
                 self.messages.put((action, work(), None))
+            except TransactionError as exc:
+                self.messages.put((action, exc.result, traceback.format_exc()))
             except Exception:
                 self.messages.put((action, None, traceback.format_exc()))
 
@@ -154,22 +187,36 @@ class Application(ttk.Frame):
             messagebox.showerror("Select inputs", "Select both Master and Source ARXML folders.")
             return
         self.plan = None
+        self.report_target = None
         self.last_error = ""
         self.run_worker("scan", lambda: scan(master, source))
 
     def start_apply(self):
         plan = self.plan
-        if not plan or not plan.valid or not plan.operations:
+        if self.busy or not plan or not plan.valid or not plan.operations:
+            return
+        if self.undo_result and self.undo_result.state == "recovery_required":
             return
         xsd = self.paths["XSD"].get().strip() or None
         self.run_worker("apply", lambda: apply_patch(plan, xsd))
 
+    def start_revert(self):
+        result = self.undo_result
+        if not result or not result.can_revert or self.busy:
+            return
+        if not self.selected_master_matches_undo():
+            return
+        self.report_target = result
+        self.run_worker("revert", lambda: revert_patch(result))
+
     def start_report(self):
+        if self.report_target is None or self.busy:
+            return
         folder = filedialog.askdirectory(
             title="Select a new or empty report folder", mustexist=False
         )
         if folder:
-            plan, error = self.plan, self.last_error
+            plan, error = self.report_target, self.last_error
             self.run_worker(
                 "report", lambda: save_report(plan, folder, "failed" if error else "scanned", error)
             )
@@ -183,12 +230,19 @@ class Application(ttk.Frame):
         self.busy = False
         self.progress.stop()
         if error:
+            if isinstance(result, PatchResult):
+                self.report_target = result
+                if result.can_revert:
+                    self.undo_result = result
+            if action in {"apply", "revert"}:
+                self.plan = None
             self.last_error = error
             self.status.set("Operation failed. See details; Save Report includes the full error.")
             self.set_detail(error)
             messagebox.showerror("Operation failed", error.strip().splitlines()[-1])
         elif action == "scan":
             self.plan = result
+            self.report_target = result
             self.display_plan()
             if result.valid and not result.operations:
                 messagebox.showinfo(
@@ -200,15 +254,35 @@ class Application(ttk.Frame):
                 )
         elif action == "apply":
             self.plan = None
+            self.last_error = ""
+            self.undo_result = result
+            self.report_target = result
             self.status.set(f"Master updated: {result.master_folder}. Scan again to refresh.")
             self.summary.set(f"Updated {len(result.changed_files)} Master file(s).")
             self.set_detail(
-                f"Master: {result.master_folder}\nBackup and reports: {result.backup_folder}\n"
-                "References, structure, isolation and idempotency passed."
+                f"Master: {result.master_folder}\n"
+                "References, structure, isolation and idempotency passed.\n"
+                "Revert Last Apply is available while this app stays open."
             )
             messagebox.showinfo(
                 "Patch complete",
-                f"Master updated in place.\nBackup and reports:\n{result.backup_folder}",
+                "Master updated in place.\n"
+                "Use Revert Last Apply to restore the previous files and modification times.\n"
+                "Undo data expires when this app closes.",
+            )
+        elif action == "revert":
+            self.plan = None
+            self.last_error = ""
+            self.report_target = result
+            self.tree.delete(*self.tree.get_children())
+            self.rows.clear()
+            self.summary.set(f"Restored {len(result.changed_files)} Master file(s).")
+            self.status.set("Revert complete. Scan again to compare.")
+            self.set_detail(
+                f"Master: {result.master_folder}\nOriginal bytes and modification times restored."
+            )
+            messagebox.showinfo(
+                "Revert complete", "Original files and modification times restored."
             )
         else:
             self.status.set(f"Reports saved: {result}")

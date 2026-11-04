@@ -116,6 +116,8 @@ def test_reassigned_uuids_are_planned_reported_and_idempotent(inputs):
     save_report(plan, report_folder)
     planned = plan.report()["uuid_changes"]
     result = apply_patch(plan)
+    apply_report = master.parent / "apply-report"
+    save_report(result, apply_report)
     patched = Dataset.load(master)
     assert not patched.errors
     assert patched.objects["/Pkg/If/Old"].node.get("UUID") == MASTER_UUID
@@ -124,7 +126,7 @@ def test_reassigned_uuids_are_planned_reported_and_idempotent(inputs):
     assert semantic(plan.source.objects["/Pkg/If/New"].node) != semantic(
         patched.objects["/Pkg/If/New"].node
     )
-    for folder in (report_folder, result.backup_folder):
+    for folder in (report_folder, apply_report):
         report = json.loads((folder / "patch_report.json").read_text(encoding="utf-8"))
         assert report["uuid_changes"] == planned
         assert all(
