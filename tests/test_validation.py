@@ -24,8 +24,8 @@ def test_created_access_containers_precede_symbol(inputs, mode, direction):
         master_component=component(),
         source_component=component(accesses=access(mode, direction)),
     )
-    apply_patch(scan(master, source), output)
-    runnable = Dataset.load(output).objects["/Pkg/Swc/Behavior/Run"].node
+    apply_patch(scan(master, source))
+    runnable = Dataset.load(master).objects["/Pkg/Swc/Behavior/Run"].node
     names = [tag(n) for n in runnable]
     assert names.index(mode) < names.index("SYMBOL")
     assert check_order(runnable) is None
@@ -110,7 +110,7 @@ def test_invalid_port_interface_dest_blocks_comspec(inputs, side):
     assert not plan.valid
     assert any("DEST" in r.Reason for r in plan.records)
     with pytest.raises(PatcherError):
-        apply_patch(plan, output)
+        apply_patch(plan)
     assert not output.exists()
 
 
@@ -123,7 +123,7 @@ def test_no_new_interface_is_created(inputs):
     plan = scan(master, source)
     assert plan.summary["UNSUPPORTED"] == 1
     with pytest.raises(PatcherError):
-        apply_patch(plan, output)
+        apply_patch(plan)
 
 
 def test_unknown_parent_child_blocks_guessed_order(inputs):
@@ -168,7 +168,7 @@ def test_optional_xsd_is_enforced(inputs, tmp_path):
         "</xs:schema>"
     )
     with pytest.raises(PatcherError, match="XSD validation failed"):
-        apply_patch(scan(master, source), output, xsd)
+        apply_patch(scan(master, source), xsd)
     assert not output.exists()
 
 
@@ -188,8 +188,8 @@ def test_created_interface_container_order(inputs):
     path.write_text(
         path.read_text().replace("<DATA-ELEMENTS></DATA-ELEMENTS>", "<INVALIDATION-POLICYS/>")
     )
-    apply_patch(scan(master, source), output)
-    interface = Dataset.load(output).objects["/Pkg/If"].node
+    apply_patch(scan(master, source))
+    interface = Dataset.load(master).objects["/Pkg/If"].node
     assert interface.index(child(interface, "DATA-ELEMENTS")) < interface.index(
         child(interface, "INVALIDATION-POLICYS")
     )
@@ -222,7 +222,7 @@ def test_nv_data_access_is_outside_sr_scope(inputs, direction, mode, existing):
     assert len(rows) == 1 and rows[0].Action == "UNSUPPORTED"
     assert "SENDER-RECEIVER-INTERFACE" in rows[0].Reason
     with pytest.raises(PatcherError, match="Preflight blocked"):
-        apply_patch(plan, output)
+        apply_patch(plan)
     assert not output.exists()
 
 
@@ -239,7 +239,7 @@ def test_unknown_mode_blocks_other_additions_even_with_identical_access(inputs, 
     assert plan.summary["UNSUPPORTED"] == 1
     assert not plan.valid
     with pytest.raises(PatcherError, match="Preflight blocked"):
-        apply_patch(plan, output)
+        apply_patch(plan)
     assert not output.exists()
 
 
@@ -254,7 +254,7 @@ def test_empty_unknown_data_mode_is_not_silently_accepted(inputs):
     plan = scan(master, source)
     assert plan.summary["UNSUPPORTED"] == 1
     with pytest.raises(PatcherError):
-        apply_patch(plan, output)
+        apply_patch(plan)
     assert not output.exists()
 
 
@@ -273,5 +273,5 @@ def test_unchanged_known_local_access_does_not_block_sr_patch(inputs, mode):
     )
     plan = scan(master, source)
     assert plan.valid
-    apply_patch(plan, output)
-    assert scan(output, source).summary["ADD"] == 0
+    apply_patch(plan)
+    assert scan(master, source).summary["ADD"] == 0

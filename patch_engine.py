@@ -1,4 +1,4 @@
-"""Copy accepted nodes in memory, prove isolation/idempotency, publish atomically."""
+"""Validate accepted additions in memory before updating Master in place."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from lxml import etree as ET
 
 from arxml_parser import NS, Dataset, Document, PatcherError, child, semantic, tag
 from diff_engine import Plan, compare
+from file_transaction import PatchResult, commit_changes
 from schema_profile import ACCESS_CONTAINERS, ORDER
 from validator import check_access, check_dependencies, check_order, validate_xsd
 
@@ -31,15 +32,10 @@ def report_text(report: dict) -> str:
     ]
     lines.extend("ERROR: " + e for e in report["errors"])
     for row in report["records"]:
-        lines.extend(
-            [
-                f"[{row['Action']}] {row['Category']} {row['ObjectPath']}",
-                f"  {row['Reason']}",
-                f"  Source: {row['SourceFile']}",
-                f"  Target: {row['TargetFile'] or '(none)'}",
-                "  Dependencies: " + (", ".join(row["Dependencies"]) or "(none)"),
-            ]
-        )
+        if row["Action"] != "EXISTS":
+            lines.append(
+                f"[{row['Action']}] {row['Category']} {row['ObjectPath']}: {row['Reason']}"
+            )
     return "\n".join(lines) + "\n"
 
 
@@ -50,18 +46,18 @@ def _write_reports(folder: Path, report: dict) -> None:
     (folder / "patch_report.txt").write_text(report_text(report), encoding="utf-8")
 
 
-def _output_path(plan: Plan, folder: str | Path) -> Path:
+def _report_path(plan: Plan, folder: str | Path) -> Path:
     if not str(folder).strip():
-        raise PatcherError("Select an output folder")
+        raise PatcherError("Select a report folder")
     output = Path(folder).expanduser().absolute()
     if output.is_symlink():
-        raise PatcherError("Output must not be a symbolic link")
+        raise PatcherError("Report folder must not be a symbolic link")
     output = output.resolve()
     for input_folder in [plan.master.folder, plan.source.folder]:
         if output.is_relative_to(input_folder) or input_folder.is_relative_to(output):
-            raise PatcherError("Output must be separate from both input folders (no nesting)")
+            raise PatcherError("Report folder must be separate from both inputs (no nesting)")
     if output.exists() and (not output.is_dir() or any(output.iterdir())):
-        raise PatcherError("Output already contains data; select a new or empty folder")
+        raise PatcherError("Report folder already contains data; select a new or empty folder")
     return output
 
 
@@ -77,7 +73,7 @@ def _publish(stage: Path, output: Path) -> None:
 
 def save_report(plan: Plan, folder: str | Path, outcome="scanned", error="") -> Path:
     """Explicit report-only export also works for blocked scans; contains no ARXML."""
-    output = _output_path(plan, folder)
+    output = _report_path(plan, folder)
     output.parent.mkdir(parents=True, exist_ok=True)
     stage = Path(tempfile.mkdtemp(prefix=".arxml-report-", dir=output.parent))
     try:
@@ -146,12 +142,15 @@ def _serialize(document: Document) -> bytes:
     return raw
 
 
-def apply_patch(plan: Plan, folder: str | Path, xsd: str | Path | None = None) -> Path:
+def apply_patch(plan: Plan, xsd: str | Path | None = None) -> PatchResult:
     if not plan.valid:
         raise PatcherError("Preflight blocked: resolve all errors, conflicts and unsupported items")
     if not plan.operations:
         raise PatcherError("No ADD changes to apply")
-    output = _output_path(plan, folder)
+    if plan.master.folder.is_relative_to(plan.source.folder) or plan.source.folder.is_relative_to(
+        plan.master.folder
+    ):
+        raise PatcherError("Master and Source must be separate folders with no nesting")
     plan.master.assert_unchanged()
     plan.source.assert_unchanged()
     # Build fresh trees from the captured bytes; scan input objects remain untouched.
@@ -212,7 +211,7 @@ def apply_patch(plan: Plan, folder: str | Path, xsd: str | Path | None = None) -
     for file, doc in plan.master.documents.items():
         if semantic(proof.documents[file].tree.getroot()) != semantic(doc.tree.getroot()):
             raise PatcherError(f"Unrelated XML content changed in {file}")
-    # Serialize and parse once more before any output becomes visible.
+    # Serialize and parse once more before changing any Master file.
     serialized = Dataset(plan.master.folder)
     for file, doc in patched.documents.items():
         serialized._parse(file, _serialize(doc) if file in changed else doc.original)
@@ -224,30 +223,12 @@ def apply_patch(plan: Plan, folder: str | Path, xsd: str | Path | None = None) -
             raise PatcherError(f"XML serialization changed meaning in {file}")
     if xsd:
         validate_xsd(serialized, xsd)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    stage = Path(tempfile.mkdtemp(prefix=".arxml-patch-", dir=output.parent))
-    try:
-        for file, doc in serialized.documents.items():
-            dest = stage / file
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_bytes(doc.original)
-        report = plan.report("patched", xsd=bool(xsd))
-        report["output_folder"] = str(output)
-        report["changed_files"] = sorted(p.as_posix() for p in changed)
-        report["post_patch_validation"] = {
-            "references": True,
-            "structure": True,
-            "unrelated_content_preserved": True,
-            "second_scan_add": repeat.summary["ADD"],
-        }
-        _write_reports(stage, report)
-        # Abort rather than publish if inputs changed while validation/export was running.
-        plan.master.assert_unchanged()
-        plan.source.assert_unchanged()
-        _publish(stage, output)
-    except OSError as exc:
-        raise PatcherError(f"Cannot publish output; no partial patch was exported: {exc}") from exc
-    finally:
-        if stage.exists():
-            shutil.rmtree(stage)
-    return output
+    report = plan.report("validated", xsd=bool(xsd))
+    report["changed_files"] = sorted(p.as_posix() for p in changed)
+    report["post_patch_validation"] = {
+        "references": True,
+        "structure": True,
+        "unrelated_content_preserved": True,
+        "second_scan_add": repeat.summary["ADD"],
+    }
+    return commit_changes(plan, serialized, changed, report, _write_reports)
