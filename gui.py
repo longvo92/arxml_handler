@@ -38,13 +38,15 @@ class Application(ttk.Frame):
         )
         ttk.Label(
             self,
-            text="Add generated data elements, ComSpecs and runnable accesses. "
-            "Revert Last Apply restores original files and modification times during this session.",
+            text="Add missing S/R items from Source to Master. Source files are never changed.\n"
+            "Undo is available for the latest update only, while this app stays open.",
         ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 14))
         for row, name in enumerate(self.paths, start=2):
-            label = (
-                f"{name} ARXML Folder" if name in {"Master", "Source"} else "XSD File (optional)"
-            )
+            label = {
+                "Master": "Master folder (to update)",
+                "Source": "Source folder (generated ARXML)",
+                "XSD": "Validation schema (.xsd, optional)",
+            }[name]
             ttk.Label(self, text=label).grid(row=row, column=0, sticky="w", padx=(0, 12), pady=4)
             entry = ttk.Entry(self, textvariable=self.paths[name])
             entry.grid(row=row, column=1, sticky="ew", pady=4)
@@ -53,11 +55,9 @@ class Application(ttk.Frame):
             self.controls.extend([entry, button])
         actions = ttk.Frame(self)
         actions.grid(row=5, column=0, columnspan=3, sticky="ew", pady=12)
-        self.scan_button = ttk.Button(actions, text="Scan & Compare", command=self.start_scan)
-        self.apply_button = ttk.Button(actions, text="Apply to Master", command=self.start_apply)
-        self.revert_button = ttk.Button(
-            actions, text="Revert Last Apply", command=self.start_revert
-        )
+        self.scan_button = ttk.Button(actions, text="Preview Changes", command=self.start_scan)
+        self.apply_button = ttk.Button(actions, text="Update Master", command=self.start_apply)
+        self.revert_button = ttk.Button(actions, text="Undo Last Update", command=self.start_revert)
         self.report_button = ttk.Button(actions, text="Save Report…", command=self.start_report)
         for button in [self.scan_button, self.apply_button, self.revert_button, self.report_button]:
             button.pack(side="left", padx=(0, 8))
@@ -90,13 +90,15 @@ class Application(ttk.Frame):
         ]:
             self.tree.tag_configure(status, foreground=color)
         self.tree.bind("<<TreeviewSelect>>", self.show_detail)
-        self.summary = tk.StringVar(value="Select Master and Source folders, then scan.")
+        self.summary = tk.StringVar(
+            value="Select Master and Source folders, then click Preview Changes."
+        )
         ttk.Label(self, textvariable=self.summary, wraplength=1050).grid(
             row=7, column=0, columnspan=3, sticky="w", pady=(12, 6)
         )
         self.detail = tk.Text(self, height=5, wrap="word", state="disabled", font=("Consolas", 10))
         self.detail.grid(row=8, column=0, columnspan=3, sticky="ew")
-        self.status = tk.StringVar(value="Ready — supported profile: AUTOSAR_00047")
+        self.status = tk.StringVar(value="Ready — supported ARXML version: AUTOSAR_00047")
         ttk.Label(self, textvariable=self.status, wraplength=1050).grid(
             row=9, column=0, columnspan=3, sticky="w", pady=(8, 0)
         )
@@ -110,7 +112,10 @@ class Application(ttk.Frame):
         if self.busy:
             self.status.set("Please wait for the current operation to finish before closing.")
         elif self.undo_result and self.undo_result.state == "recovery_required":
-            self.status.set("Recovery is incomplete. Use Revert Last Apply before closing.")
+            self.status.set(
+                "Recovery is incomplete. Keep this app open and use "
+                "Undo Last Update to restore Master."
+            )
         else:
             self.root.destroy()
 
@@ -146,7 +151,11 @@ class Application(ttk.Frame):
         self.plan = None
         self.report_target = None
         self.last_error = ""
-        self.status.set("Inputs changed — scan again.")
+        self.tree.delete(*self.tree.get_children())
+        self.rows.clear()
+        self.summary.set("Preview Changes to compare the selected folders.")
+        self.set_detail("")
+        self.status.set("Folders changed — click Preview Changes to refresh the results.")
         self._buttons()
 
     def browse(self, name):
@@ -164,9 +173,9 @@ class Application(ttk.Frame):
         self.progress.start(12)
         self.status.set(
             {
-                "scan": "Scanning ARXML…",
-                "apply": "Patching and validating…",
-                "revert": "Restoring original files and modification times…",
+                "scan": "Comparing Master and Source…",
+                "apply": "Validating changes and updating Master…",
+                "revert": "Restoring Master files and their original Date modified…",
                 "report": "Saving report…",
             }[action]
         )
@@ -184,7 +193,11 @@ class Application(ttk.Frame):
     def start_scan(self):
         master, source = (self.paths[n].get().strip() for n in ["Master", "Source"])
         if not master or not source:
-            messagebox.showerror("Select inputs", "Select both Master and Source ARXML folders.")
+            messagebox.showerror(
+                "Folders required",
+                "Select the Master folder to update and the Source folder "
+                "containing generated ARXML.",
+            )
             return
         self.plan = None
         self.report_target = None
@@ -237,38 +250,60 @@ class Application(ttk.Frame):
             if action in {"apply", "revert"}:
                 self.plan = None
             self.last_error = error
-            self.status.set("Operation failed. See details; Save Report includes the full error.")
+            title = {
+                "scan": "Could not preview changes",
+                "apply": "Master update failed",
+                "revert": "Could not undo the update",
+                "report": "Could not save the report",
+            }[action]
+            guidance = "See the details below for the full error."
+            if isinstance(result, PatchResult) and result.state == "recovery_required":
+                guidance = (
+                    "Some Master files may still be changed. Keep this app open. "
+                    "Resolve the error, then click Undo Last Update to restore the original files."
+                )
+            elif action == "revert":
+                guidance = "Resolve the error, then try Undo Last Update again. Keep this app open."
+            self.status.set(f"{title}. {guidance}")
             self.set_detail(error)
-            messagebox.showerror("Operation failed", error.strip().splitlines()[-1])
+            messagebox.showerror(title, f"{error.strip().splitlines()[-1]}\n\n{guidance}")
         elif action == "scan":
             self.plan = result
             self.report_target = result
             self.display_plan()
             if result.valid and not result.operations:
                 messagebox.showinfo(
-                    "Scan complete",
-                    "Preflight checks passed.\n"
-                    "No supported S/R additions are needed.\n\n"
-                    f"{result.summary['EXISTS']} equivalent item(s) found in Master.",
+                    "No changes needed",
+                    "No issues were found by the scan checks.\n"
+                    "No supported S/R items need to be added to Master.\n\n"
+                    f"Already present: {result.summary['EXISTS']} item(s).\n"
+                    "XSD validation was not run; it runs only when updating Master "
+                    "with a schema selected.",
                     parent=self.root,
                 )
         elif action == "apply":
             self.plan = None
+            self.tree.delete(*self.tree.get_children())
+            self.rows.clear()
             self.last_error = ""
             self.undo_result = result
             self.report_target = result
-            self.status.set(f"Master updated: {result.master_folder}. Scan again to refresh.")
+            self.status.set(
+                f"Master updated: {result.master_folder}. Preview Changes to compare again."
+            )
             self.summary.set(f"Updated {len(result.changed_files)} Master file(s).")
             self.set_detail(
                 f"Master: {result.master_folder}\n"
-                "References, structure, isolation and idempotency passed.\n"
-                "Revert Last Apply is available while this app stays open."
+                "ARXML structure and reference checks passed.\n"
+                f"{self.validation_summary(result)}\n"
+                "Undo Last Update is available while this app stays open."
             )
             messagebox.showinfo(
-                "Patch complete",
-                "Master updated in place.\n"
-                "Use Revert Last Apply to restore the previous files and modification times.\n"
-                "Undo data expires when this app closes.",
+                "Master updated",
+                f"Updated {len(result.changed_files)} Master file(s).\n"
+                f"{self.validation_summary(result)}\n\n"
+                "Undo Last Update restores the previous contents and Date modified.\n"
+                "Only the latest update can be undone. Closing this app clears undo data.",
             )
         elif action == "revert":
             self.plan = None
@@ -277,17 +312,26 @@ class Application(ttk.Frame):
             self.tree.delete(*self.tree.get_children())
             self.rows.clear()
             self.summary.set(f"Restored {len(result.changed_files)} Master file(s).")
-            self.status.set("Revert complete. Scan again to compare.")
+            self.status.set("Undo complete. Click Preview Changes to compare again.")
             self.set_detail(
-                f"Master: {result.master_folder}\nOriginal bytes and modification times restored."
+                f"Master: {result.master_folder}\n"
+                "Original file contents and Date modified restored."
             )
             messagebox.showinfo(
-                "Revert complete", "Original files and modification times restored."
+                "Undo complete", "Master files and their original Date modified have been restored."
             )
         else:
             self.status.set(f"Reports saved: {result}")
         self._buttons()
         self.root.after(100, self.poll)
+
+    @staticmethod
+    def validation_summary(result):
+        return (
+            "XSD validation passed."
+            if result.report.get("xsd_validated")
+            else "XSD validation was not run (no schema selected)."
+        )
 
     def display_plan(self):
         self.tree.delete(*self.tree.get_children())
@@ -312,18 +356,20 @@ class Application(ttk.Frame):
         self.summary.set(
             f"New Data Elements: {s['DataElement']}    New ComSpecs: {s['ComSpec']}    "
             f"New Access Points: {s['RunnableAccess']}    Conflicts: {s['CONFLICT']}    "
-            f"Unsupported: {s['UNSUPPORTED']}    Exists: {s['EXISTS']}    Errors: {s['Errors']}"
+            f"Unsupported: {s['UNSUPPORTED']}    Already present: {s['EXISTS']}    "
+            f"Errors: {s['Errors']}"
         )
         self.status.set(
-            "Preflight passed — ready to patch."
+            "Checks passed — review the proposed additions, then click Update Master."
             if self.plan.valid and self.plan.operations
-            else "No additions needed."
+            else "No supported additions needed. Master has not been changed."
             if self.plan.valid
-            else "Preflight blocked — review errors, conflicts or unsupported items."
+            else "Update unavailable — review the errors, conflicts or unsupported items above."
         )
         self.set_detail(
-            "Select a row for full paths and dependency details. "
-            "XSD validation runs on Apply when an XSD file is selected."
+            "Select an item to see file paths and required dependencies.\n"
+            "XSD is an optional AUTOSAR schema file for checking XML structure. "
+            "It is checked during Update Master. Without it, only the built-in checks run."
         )
 
     def set_detail(self, text):

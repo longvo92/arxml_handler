@@ -13,19 +13,19 @@ python -m pip install -r requirements.txt
 python main.py
 ```
 
-1. Select **Master ARXML Folder** (the existing set to update) and **Source ARXML
-   Folder** (generated definitions). ARXML files are discovered recursively, regardless of names
+1. Select **Master folder (to update)** (the existing set to update) and **Source folder (generated ARXML)** (generated definitions). ARXML files are discovered recursively, regardless of names
    or extension case. Definitions and dependencies can reside in different files.
-2. Click **Scan & Compare**. This creates no output. Select rows to inspect full
+2. Click **Preview Changes**. This creates no output. Select rows to inspect full
    paths, reasons and dependencies. Scan again after changing either input.
-   When preflight passes with no supported additions, a **Scan complete** popup
+   When preflight passes with no supported additions, a **No changes needed** popup
    confirms the result and shows the number of equivalent items found in Master.
 3. Optionally select a matching XSD file with all local include/import files.
-4. Click **Apply to Master**. It is enabled only when preflight passes and additions
+4. Click **Update Master**. It is enabled only when preflight passes and additions
    exist. The tool validates the complete result before modifying any Master file.
    The success message confirms that session undo is available. Scan again to refresh
-   the results after Apply.
-5. Click **Revert Last Apply** to restore the previous files and their **Date modified**
+   the results after updating Master.
+   The success message states whether XSD validation passed or was not run.
+5. Click **Undo Last Update** to restore the previous files and their **Date modified**
    timestamps. This is available only while the same application session stays open.
 
 **Save Report** exports `patch_report.txt` and `patch_report.json` separately,
@@ -104,7 +104,7 @@ content preservation, reparsing, and a second scan with `ADD = 0`. All checks,
 including optional XSD validation, finish in memory before writing Master.
 
 Apply retains the original bytes, file modes and modification timestamps of changed
-files in RAM. **Revert Last Apply** restores those exact bytes and **Date modified**
+files in RAM. **Undo Last Update** restores those exact bytes and **Date modified**
 values using nanosecond timestamps, then verifies them. File creation timestamps
 and filesystem change logs follow operating-system behavior.
 

@@ -66,7 +66,7 @@ def test_gui_scan_apply_and_stale_input(inputs, app, monkeypatch):
     assert str(application.apply_button["state"]) == "normal"
     (row,) = application.tree.get_children()
     assert application.tree.set(row, "Status") == "ADD"
-    assert "Exists: 1" in application.summary.get()
+    assert "Already present: 1" in application.summary.get()
     application.tree.selection_set(row)
     application.show_detail()
     assert "Dependencies: /Pkg/Value" in application.detail.get("1.0", "end")
@@ -79,16 +79,20 @@ def test_gui_scan_apply_and_stale_input(inputs, app, monkeypatch):
     assert not (master.parent / ".arxml-patcher-backups").exists()
     assert str(application.revert_button["state"]) == "normal"
     assert str(application.report_button["state"]) == "normal"
-    assert messages[-1][0] == "Patch complete"
+    assert messages[-1][0] == "Master updated"
+    assert "XSD validation was not run" in messages[-1][1]
+    assert "Closing this app clears undo data" in messages[-1][1]
+    assert not application.tree.get_children()
     application.scan_button.invoke()
     settle(application)
     assert not application.tree.get_children()
-    assert "Exists: 2" in application.summary.get()
+    assert "Already present: 2" in application.summary.get()
     assert messages[-1] == (
-        "Scan complete",
-        "Preflight checks passed.\n"
-        "No supported S/R additions are needed.\n\n"
-        "2 equivalent item(s) found in Master.",
+        "No changes needed",
+        "No issues were found by the scan checks.\n"
+        "No supported S/R items need to be added to Master.\n\n"
+        "Already present: 2 item(s).\n"
+        "XSD validation was not run; it runs only when updating Master with a schema selected.",
     )
     assert str(application.apply_button["state"]) == "disabled"
     application.paths["Source"].set(str(source / "changed"))
@@ -102,7 +106,7 @@ def test_gui_scan_apply_and_stale_input(inputs, app, monkeypatch):
     settle(application)
     assert (target.read_bytes(), target.stat().st_mtime_ns) == before
     assert str(application.revert_button["state"]) == "disabled"
-    assert messages[-1][0] == "Revert complete"
+    assert messages[-1][0] == "Undo complete"
     report = master.parent / "revert-report"
     monkeypatch.setattr(gui.filedialog, "askdirectory", lambda **kw: str(report))
     application.report_button.invoke()
@@ -201,11 +205,13 @@ def test_gui_retains_partial_apply_for_recovery(inputs, app, monkeypatch):
     assert application.undo_result.state == "recovery_required"
     assert str(application.revert_button["state"]) == "normal"
     assert str(application.apply_button["state"]) == "disabled"
-    assert messages[-1][0] == "Operation failed"
+    assert messages[-1][0] == "Master update failed"
+    assert "Some Master files may still be changed" in messages[-1][1]
+    assert "Keep this app open" in messages[-1][1]
     application.close()
     assert "Recovery is incomplete" in application.status.get()
     monkeypatch.setattr(file_transaction, "replace_file", replace)
     application.revert_button.invoke()
     settle(application)
     assert Dataset.load(master).manifest() == before
-    assert messages[-1][0] == "Revert complete"
+    assert messages[-1][0] == "Undo complete"
