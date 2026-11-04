@@ -13,6 +13,7 @@ from lxml import etree as ET
 from arxml_parser import (
     Dataset,
     Object,
+    PatcherError,
     child,
     children,
     descendants,
@@ -177,7 +178,11 @@ def compare(master: Dataset, source: Dataset) -> Plan:
             )
         planned_node = deepcopy(node)
         changes = []
-        for original, planned in zip(node.iter(), planned_node.iter(), strict=True):
+        original_nodes = list(node.iter())
+        planned_nodes = list(planned_node.iter())
+        if len(original_nodes) != len(planned_nodes):
+            raise PatcherError("Copied definition has a different number of XML nodes")
+        for original, planned in zip(original_nodes, planned_nodes):
             identifier = original.get("UUID")
             if identifier is None:
                 continue

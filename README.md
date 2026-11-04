@@ -1,7 +1,7 @@
 # AUTOSAR S/R Incremental Patcher
 
 A small Windows desktop tool that copies missing generated S/R definitions into
-the existing Master AUTOSAR architecture in place. Python 3.11+, `lxml`
+the existing Master AUTOSAR architecture in place. Python 3.9+, `lxml`
 and Tkinter; no MATLAB session, server, or AUTOSAR authoring tool is required.
 
 ## Run
