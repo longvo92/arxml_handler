@@ -28,7 +28,7 @@ def tk_root():
 def app(monkeypatch, tk_root):
     messages = []
     monkeypatch.setattr(gui.messagebox, "showerror", lambda *args: messages.append(args))
-    monkeypatch.setattr(gui.messagebox, "showinfo", lambda *args: messages.append(args))
+    monkeypatch.setattr(gui.messagebox, "showinfo", lambda *args, **kwargs: messages.append(args))
     root = tk_root
     application = gui.Application(root)
     yield application, messages
@@ -55,6 +55,7 @@ def test_gui_scan_apply_and_stale_input(inputs, app):
     application.scan_button.invoke()
     settle(application)
     assert application.plan.valid
+    assert not messages
     assert str(application.apply_button["state"]) == "normal"
     (row,) = application.tree.get_children()
     assert application.tree.set(row, "Status") == "ADD"
@@ -74,23 +75,33 @@ def test_gui_scan_apply_and_stale_input(inputs, app):
     settle(application)
     assert not application.tree.get_children()
     assert "Exists: 2" in application.summary.get()
+    assert messages[-1] == (
+        "Scan complete",
+        "Preflight checks passed.\n"
+        "No supported S/R additions are needed.\n\n"
+        "2 equivalent item(s) found in Master.",
+    )
+    assert str(application.apply_button["state"]) == "disabled"
     application.paths["Source"].set(str(source / "changed"))
     assert str(application.apply_button["state"]) == "disabled"
 
 
-def test_gui_blocks_invalid_preflight_and_can_save_report(inputs, app, monkeypatch):
+@pytest.mark.parametrize("addition", ["", element()])
+def test_gui_blocks_invalid_preflight_and_can_save_report(inputs, app, monkeypatch, addition):
     master, source, output = inputs(
-        source_elements=element("Blocked", dtype="/Pkg/Missing") + element()
+        source_elements=element("Blocked", dtype="/Pkg/Missing") + addition
     )
-    application, _ = app
+    application, messages = app
     application.paths["Master"].set(str(master))
     application.paths["Source"].set(str(source))
     application.start_scan()
     settle(application)
     assert not application.plan.valid
+    assert not messages
     assert str(application.apply_button["state"]) == "disabled"
     rows = application.tree.get_children()
-    assert [application.tree.set(row, "Status") for row in rows] == ["UNSUPPORTED", "ADD"]
+    expected = ["UNSUPPORTED", "ADD"] if addition else ["UNSUPPORTED"]
+    assert [application.tree.set(row, "Status") for row in rows] == expected
     assert "Missing dependency in Master" in application.tree.set(rows[0], "Reason")
     report = output.parent / "report"
     monkeypatch.setattr(gui.filedialog, "askdirectory", lambda **kw: str(report))

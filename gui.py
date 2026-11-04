@@ -190,6 +190,14 @@ class Application(ttk.Frame):
         elif action == "scan":
             self.plan = result
             self.display_plan()
+            if result.valid and not result.operations:
+                messagebox.showinfo(
+                    "Scan complete",
+                    "Preflight checks passed.\n"
+                    "No supported S/R additions are needed.\n\n"
+                    f"{result.summary['EXISTS']} equivalent item(s) found in Master.",
+                    parent=self.root,
+                )
         elif action == "apply":
             self.plan = None
             self.status.set(f"Master updated: {result.master_folder}. Scan again to refresh.")

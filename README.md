@@ -18,6 +18,8 @@ python main.py
    or extension case. Definitions and dependencies can reside in different files.
 2. Click **Scan & Compare**. This creates no output. Select rows to inspect full
    paths, reasons and dependencies. Scan again after changing either input.
+   When preflight passes with no supported additions, a **Scan complete** popup
+   confirms the result and shows the number of equivalent items found in Master.
 3. Optionally select a matching XSD file with all local include/import files.
 4. Click **Apply to Master**. It is enabled only when preflight passes and additions
    exist. The tool validates the complete result before modifying any Master file.
