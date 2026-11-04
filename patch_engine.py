@@ -183,7 +183,9 @@ def apply_patch(plan: Plan, xsd: str | Path | None = None) -> PatchResult:
     patched.reindex()
     if patched.errors:
         raise PatcherError("Post-patch indexing failed: " + "; ".join(patched.errors))
-    for op, (_, node) in zip(operations, inserted, strict=True):
+    if len(operations) != len(inserted):
+        raise PatcherError("Inserted definition count does not match planned additions")
+    for op, (_, node) in zip(operations, inserted):
         if semantic(node) != semantic(op.source):
             raise PatcherError(f"Copied definition changed: {op.record.ObjectPath}")
         _, error, _ = check_dependencies(node, patched.objects, plan.source)
