@@ -1,4 +1,4 @@
-"""Validated in-place writes with durable backups and rollback on ordinary failures."""
+"""In-memory undo with guarded file replacement and rollback on ordinary failures."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import json
 import os
 import stat
 import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -13,10 +14,37 @@ from arxml_parser import Dataset, PatcherError
 
 
 @dataclass(frozen=True)
+class FileState:
+    data: bytes
+    mode: int
+    atime_ns: int | None
+    mtime_ns: int | None
+
+
+@dataclass
 class PatchResult:
     master_folder: Path
-    backup_folder: Path
+    source_folder: Path
     changed_files: tuple[Path, ...]
+    originals: dict[Path, FileState]
+    current: dict[Path, FileState]
+    report: dict
+    state: str = "prepared"
+
+    @property
+    def can_revert(self) -> bool:
+        return self.state in {"applied", "recovery_required"}
+
+
+class TransactionError(PatcherError):
+    """Retain the only undo copy when an interrupted operation needs recovery."""
+
+    def __init__(self, message: str, result: PatchResult):
+        super().__init__(message)
+        self.result = result
+
+
+_pending: dict[Path, PatchResult] = {}
 
 
 def replace_file(path: Path, data: bytes) -> None:
@@ -35,111 +63,199 @@ def replace_file(path: Path, data: bytes) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def _json(path: Path, data: dict) -> None:
-    replace_file(path, (json.dumps(data, indent=2) + "\n").encode("utf-8"))
+def _snapshot(path: Path) -> FileState:
+    if path.is_symlink() or path.resolve() != path.absolute():
+        raise PatcherError(f"Linked Master file is unsupported: {path}")
+    metadata = path.stat()
+    data = path.read_bytes()
+    after = path.stat()
+    if (metadata.st_mtime_ns, metadata.st_size) != (after.st_mtime_ns, after.st_size):
+        raise PatcherError(f"Master changed while reading: {path}")
+    return FileState(
+        data, stat.S_IMODE(metadata.st_mode), metadata.st_atime_ns, metadata.st_mtime_ns
+    )
 
 
-def commit_changes(plan, validated: Dataset, changed: set[Path], report: dict, write_reports):
-    master, source = plan.master.folder, plan.source.folder
-    if master.is_relative_to(source) or source.is_relative_to(master):
-        raise PatcherError("Master and Source must be separate folders with no nesting")
-    root = master.parent / ".arxml-patcher-backups"
-    if root.is_symlink() or root.resolve() != root.absolute():
-        raise PatcherError("Backup storage must not be a linked directory")
-    root.mkdir(exist_ok=True)
-    lock = root / (master.name + ".lock")
+def _matches(actual: FileState, expected: FileState) -> bool:
+    return (
+        actual.data == expected.data
+        and actual.mode == expected.mode
+        and (expected.mtime_ns is None or actual.mtime_ns == expected.mtime_ns)
+    )
+
+
+def _require(path: Path, expected: FileState) -> None:
+    if not _matches(_snapshot(path), expected):
+        raise PatcherError(f"Master changed externally; scan/review before retrying: {path}")
+
+
+def _write_state(path: Path, snapshot: FileState) -> None:
+    replace_file(path, snapshot.data)
+    path.chmod(snapshot.mode)
+    if snapshot.mtime_ns is not None:
+        os.utime(path, ns=(snapshot.atime_ns, snapshot.mtime_ns))
+    if not _matches(_snapshot(path), snapshot):
+        raise PatcherError(f"Written contents or modification time could not be verified: {path}")
+
+
+@contextmanager
+def _master_lock(master: Path, result: PatchResult):
+    # Older releases may still have a pending disk-backed transaction.
+    legacy = master.parent / ".arxml-patcher-backups"
+    if (legacy / (master.name + ".lock")).exists():
+        raise PatcherError(f"Master is locked by another/interrupted patch: {master}")
+    for previous in legacy.glob(master.name + "-*/transaction.json"):
+        try:
+            journal = json.loads(previous.read_text(encoding="utf-8"))
+            if Path(journal["master_folder"]) == master and journal["state"] not in {
+                "committed",
+                "rolled_back",
+            }:
+                raise PatcherError(f"Unfinished legacy patch needs recovery: {previous}")
+        except (OSError, ValueError, KeyError) as exc:
+            raise PatcherError(f"Cannot verify legacy transaction: {previous}") from exc
+    lock = master.parent / ("." + master.name + ".arxml-patcher.lock")
     try:
         fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     except FileExistsError as exc:
-        raise PatcherError(
-            f"Master is locked by another/interrupted patch. Inspect {lock}"
-        ) from exc
+        raise PatcherError(f"Master is locked by another/interrupted operation: {lock}") from exc
     os.close(fd)
-    backup = None
-    journal = None
-    written = []
     try:
-        for previous in root.glob(master.name + "-*/transaction.json"):
-            try:
-                state = json.loads(previous.read_text(encoding="utf-8"))
-                if Path(state["master_folder"]) != master:
-                    continue
-                if state["state"] not in {"committed", "rolled_back"}:
-                    raise PatcherError(f"Unfinished patch needs recovery: {previous.parent}")
-            except (OSError, ValueError, KeyError) as exc:
-                raise PatcherError(f"Cannot verify previous transaction: {previous}") from exc
-        plan.master.assert_unchanged()
-        plan.source.assert_unchanged()
-        backup = Path(tempfile.mkdtemp(prefix=master.name + "-", dir=root))
-        for file in sorted(changed):
-            original = backup / "originals" / (str(file) + ".bak")
-            original.parent.mkdir(parents=True, exist_ok=True)
-            replace_file(original, plan.master.documents[file].original)
-        journal = {
-            "master_folder": str(master),
-            "state": "prepared",
-            "changed_files": sorted(p.as_posix() for p in changed),
-            "original_sha256": plan.master.manifest(),
-            "patched_sha256": validated.manifest(),
-        }
-        report.update(
-            master_folder=str(master),
-            backup_folder=str(backup),
-            write_mode="in_place",
-            outcome="prepared",
-        )
-        _json(backup / "transaction.json", journal)
-        write_reports(backup, report)
-        # All backups and validations must finish before any Master file is replaced.
-        plan.master.assert_unchanged()
-        plan.source.assert_unchanged()
-        journal["state"] = "applying"
-        _json(backup / "transaction.json", journal)
-        for file in sorted(changed):
-            destination = master / file
-            if destination.read_bytes() != plan.master.documents[file].original:
-                raise PatcherError(f"Master changed during patch: {file}")
-            written.append(file)  # Include replacements interrupted immediately after rename.
-            replace_file(destination, validated.documents[file].original)
-        actual = Dataset.load(master)
-        if actual.errors or actual.manifest() != validated.manifest():
-            raise PatcherError("Master changed or could not be verified after writing")
-        plan.source.assert_unchanged()
-        report["outcome"] = "patched"
-        write_reports(backup, report)
-        journal["state"] = "committed"
-        _json(backup / "transaction.json", journal)
-        return PatchResult(master, backup, tuple(sorted(changed)))
+        yield
+    finally:
+        try:
+            lock.unlink(missing_ok=True)
+        except OSError as exc:
+            if result.can_revert:
+                result.state = "recovery_required"
+                _pending[master] = result
+                result.report["outcome"] = result.state
+                result.report["errors"].append(str(exc))
+                raise TransactionError(
+                    f"Cannot release Master lock: {lock}. Keep this process open. "
+                    "Resolve the lock-file access problem before retrying Revert Last Apply.",
+                    result,
+                ) from exc
+            raise
+
+
+def _transition(result: PatchResult, targets: dict[Path, FileState], state: str, verify=None):
+    for file, snapshot in result.current.items():
+        _require(result.master_folder / file, snapshot)
+    before = dict(result.current)
+    previous_state = result.state
+    written = []
+    completed = set()
+    try:
+        for file, target in targets.items():
+            path = result.master_folder / file
+            _require(path, before[file])
+            if _matches(before[file], target):
+                continue
+            written.append(file)  # Include failures immediately after atomic replacement.
+            _write_state(path, target)
+            result.current[file] = _snapshot(path)
+            completed.add(file)
+        for file, snapshot in result.current.items():
+            _require(result.master_folder / file, snapshot)
+        if verify is not None:
+            verify()
     except BaseException as exc:
         recovery_errors = []
         for file in reversed(written):
+            path = result.master_folder / file
+            restore_started = False
             try:
-                destination = master / file
-                current = destination.read_bytes()
-                original = plan.master.documents[file].original
-                if current == original:
-                    continue
-                if current != validated.documents[file].original:
+                actual = _snapshot(path)
+                if file in completed and not _matches(actual, result.current[file]):
                     raise PatcherError("File changed externally; refusing to overwrite it")
-                replace_file(destination, original)
+                if actual.data not in {before[file].data, targets[file].data}:
+                    raise PatcherError("File changed externally; refusing to overwrite it")
+                if not _matches(actual, before[file]):
+                    restore_started = True
+                    _write_state(path, before[file])
+                result.current[file] = before[file]
             except BaseException as restore_error:
                 recovery_errors.append(f"{file}: {restore_error}")
-        if backup is not None and journal is not None:
-            journal["state"] = "recovery_required" if recovery_errors else "rolled_back"
-            journal["error"] = str(exc)
-            journal["recovery_errors"] = recovery_errors
-            report["outcome"] = journal["state"]
-            report["errors"].append(str(exc))
-            try:
-                _json(backup / "transaction.json", journal)
-                write_reports(backup, report)
-            except BaseException as log_error:
-                recovery_errors.append(f"Could not finalize recovery journal: {log_error}")
+                # Keep a retryable state only for bytes owned by this operation.
+                try:
+                    actual = _snapshot(path)
+                    if (restore_started or file not in completed) and actual.data in {
+                        before[file].data,
+                        targets[file].data,
+                    }:
+                        result.current[file] = actual
+                except (OSError, PatcherError):
+                    pass
+        result.state = "rolled_back" if previous_state == "prepared" else previous_state
+        if recovery_errors:
+            result.state = "recovery_required"
+            _pending[result.master_folder] = result
+        result.report["outcome"] = result.state
+        result.report["errors"].append(str(exc))
+        result.report["recovery_errors"] = recovery_errors
         detail = (
-            "Recovery required: " + "; ".join(recovery_errors)
+            "Recovery required. Keep this process open and use Revert Last Apply. "
+            + "; ".join(recovery_errors)
             if recovery_errors
-            else "Any files written by this patch were rolled back."
+            else "Any files written by this operation were rolled back."
         )
-        raise PatcherError(f"In-place patch failed: {exc}. {detail} Backup: {backup}") from exc
-    finally:
-        lock.unlink(missing_ok=True)
+        raise TransactionError(f"{state.capitalize()} failed: {exc}. {detail}", result) from exc
+    result.state = state
+    result.report["outcome"] = "patched" if state == "applied" else state
+    result.report["recovery_errors"] = []
+    if state == "reverted":
+        result.report["apply_xsd_validated"] = result.report["xsd_validated"]
+        result.report["xsd_validated"] = False
+        result.report["post_revert_validation"] = {"original_bytes": True, "original_mtime": True}
+    _pending.pop(result.master_folder, None)
+    return result
+
+
+def commit_changes(plan, validated: Dataset, changed: set[Path], report: dict) -> PatchResult:
+    master, source = plan.master.folder, plan.source.folder
+    if master.is_relative_to(source) or source.is_relative_to(master):
+        raise PatcherError("Master and Source must be separate folders with no nesting")
+    result = PatchResult(master, source, (), {}, {}, report)
+    with _master_lock(master, result):
+        if master in _pending:
+            raise PatcherError("Unfinished patch in this process; use Revert Last Apply first")
+        plan.master.assert_unchanged()
+        plan.source.assert_unchanged()
+        originals = {file: _snapshot(master / file) for file in sorted(changed)}
+        for file, snapshot in originals.items():
+            if snapshot.data != plan.master.documents[file].original:
+                raise PatcherError(f"Master changed after scan: {file}")
+        result.changed_files = tuple(originals)
+        result.originals = originals
+        result.current = dict(originals)
+        targets = {
+            file: FileState(validated.documents[file].original, snapshot.mode, None, None)
+            for file, snapshot in originals.items()
+        }
+        report.update(
+            write_mode="in_place",
+            undo_storage="memory",
+            original_mtime_ns={
+                file.as_posix(): snapshot.mtime_ns for file, snapshot in originals.items()
+            },
+        )
+
+        def verify():
+            actual = Dataset.load(master)
+            if actual.errors or actual.manifest() != validated.manifest():
+                raise PatcherError("Master changed or could not be verified after writing")
+            plan.source.assert_unchanged()
+
+        return _transition(result, targets, "applied", verify)
+
+
+def revert_patch(result: PatchResult) -> PatchResult:
+    """Restore the last Apply's original bytes and modification times in this process."""
+    if not result.can_revert:
+        raise PatcherError("No active Apply to revert")
+    with _master_lock(result.master_folder, result):
+        pending = _pending.get(result.master_folder)
+        if pending is not None and pending is not result:
+            raise PatcherError("A different unfinished operation must be recovered first")
+        return _transition(result, result.originals, "reverted")

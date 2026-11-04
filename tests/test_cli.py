@@ -37,16 +37,18 @@ def test_cli_apply_and_report(inputs, capsys):
     assert [line for line in stdout.splitlines() if line.startswith("[")] == [expected_row]
     assert not output.exists()
 
-    (backup,) = (master.parent / ".arxml-patcher-backups").iterdir()
-    for folder in (report, backup):
-        summary = (folder / "patch_report.txt").read_text(encoding="utf-8")
-        assert "EXISTS=1" in summary
-        assert [line for line in summary.splitlines() if line.startswith("[")] == [expected_row]
-        assert "/Pkg/If/Old" not in summary
-        assert "  Dependencies:" not in summary
-        data = json.loads((folder / "patch_report.json").read_text(encoding="utf-8"))
-        assert [row["Action"] for row in data["records"]] == ["EXISTS", "ADD"]
-        assert data["records"][1]["Dependencies"] == ["/Pkg/Value"]
+    assert not (master.parent / ".arxml-patcher-backups").exists()
+    summary = (report / "patch_report.txt").read_text(encoding="utf-8")
+    assert "EXISTS=1" in summary
+    assert [line for line in summary.splitlines() if line.startswith("[")] == [expected_row]
+    assert "/Pkg/If/Old" not in summary
+    assert "  Dependencies:" not in summary
+    data = json.loads((report / "patch_report.json").read_text(encoding="utf-8"))
+    assert [row["Action"] for row in data["records"]] == ["EXISTS", "ADD"]
+    assert data["records"][1]["Dependencies"] == ["/Pkg/Value"]
+    assert data["outcome"] == "patched"
+    assert data["undo_storage"] == "memory"
+    assert "expires when this command exits" in stdout
 
     rescan_report = output.parent / "rescan-report"
     assert (

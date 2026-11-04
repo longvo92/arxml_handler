@@ -7,6 +7,7 @@ import sys
 
 from arxml_parser import PatcherError
 from diff_engine import scan
+from file_transaction import TransactionError
 from patch_engine import apply_patch, save_report
 
 
@@ -20,7 +21,9 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="AUTOSAR S/R Incremental Patcher (00047)")
     parser.add_argument("--master", required=True, help="Existing Master ARXML folder to patch")
     parser.add_argument("--source", required=True, help="Source ARXML folder (read-only)")
-    parser.add_argument("--apply", action="store_true", help="Patch Master in place with backup")
+    parser.add_argument(
+        "--apply", action="store_true", help="Patch Master in place (session-only undo)"
+    )
     parser.add_argument("--report", help="Optional separate new/empty report-only folder")
     parser.add_argument("--xsd", help="Optional AUTOSAR XSD with local include/import dependencies")
     args = parser.parse_args(argv)
@@ -29,6 +32,7 @@ def main(argv=None) -> int:
     plan = scan(args.master, args.source)
     failure = ""
     outcome = "scanned" if plan.valid else "blocked"
+    report_target = plan
     try:
         print(", ".join(f"{k}={v}" for k, v in plan.summary.items()))
         for error in plan.errors:
@@ -37,17 +41,26 @@ def main(argv=None) -> int:
             if row.Action != "EXISTS":
                 print(f"[{row.Action}] {row.Category} {row.ObjectPath}: {row.Reason}")
         if args.apply:
+            print("Undo data is held in memory and expires when this command exits.")
             result = apply_patch(plan, args.xsd)
+            report_target = result
             outcome = "patched"
             print(f"Master updated: {result.master_folder}")
-            print(f"Backup and reports: {result.backup_folder}")
     except (PatcherError, OSError) as exc:
+        if isinstance(exc, TransactionError):
+            report_target = exc.result
+            if exc.result.state == "recovery_required":
+                print(
+                    "Recovery is incomplete. This command loses its in-memory recovery data "
+                    "when it exits. Use the GUI or Python API for session recovery.",
+                    file=sys.stderr,
+                )
         failure = str(exc)
         outcome = "failed"
         print(f"ERROR: {failure}", file=sys.stderr)
     if args.report:
         try:
-            print(f"Reports: {save_report(plan, args.report, outcome, failure)}")
+            print(f"Reports: {save_report(report_target, args.report, outcome, failure)}")
         except (PatcherError, OSError) as exc:
             failure = str(exc)
             print(f"ERROR saving report: {exc}", file=sys.stderr)

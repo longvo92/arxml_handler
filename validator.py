@@ -93,7 +93,9 @@ def check_dependencies(
         if kind == "SENDER-RECEIVER-INTERFACE":
             return None
         src = source.objects.get(path)
-        if src is not None and semantic(src.node) != semantic(obj.node):
+        if src is not None and semantic(src.node, ignore_uuid=True) != semantic(
+            obj.node, ignore_uuid=True
+        ):
             conflict = True
             return f"Dependency definition differs between Source and Master: {path}"
         for nested in references(obj.node):

@@ -14,6 +14,7 @@ from lxml import etree as ET
 from arxml_parser import NS, Dataset, Document, PatcherError, child, semantic, tag
 from diff_engine import Plan, compare
 from file_transaction import PatchResult, commit_changes
+from file_transaction import revert_patch as revert_patch
 from schema_profile import ACCESS_CONTAINERS, ORDER
 from validator import check_access, check_dependencies, check_order, validate_xsd
 
@@ -46,14 +47,14 @@ def _write_reports(folder: Path, report: dict) -> None:
     (folder / "patch_report.txt").write_text(report_text(report), encoding="utf-8")
 
 
-def _report_path(plan: Plan, folder: str | Path) -> Path:
+def _report_path(report: dict, folder: str | Path) -> Path:
     if not str(folder).strip():
         raise PatcherError("Select a report folder")
     output = Path(folder).expanduser().absolute()
     if output.is_symlink():
         raise PatcherError("Report folder must not be a symbolic link")
     output = output.resolve()
-    for input_folder in [plan.master.folder, plan.source.folder]:
+    for input_folder in [Path(report["master_folder"]), Path(report["source_folder"])]:
         if output.is_relative_to(input_folder) or input_folder.is_relative_to(output):
             raise PatcherError("Report folder must be separate from both inputs (no nesting)")
     if output.exists() and (not output.is_dir() or any(output.iterdir())):
@@ -71,13 +72,20 @@ def _publish(stage: Path, output: Path) -> None:
     os.rename(stage, output)
 
 
-def save_report(plan: Plan, folder: str | Path, outcome="scanned", error="") -> Path:
+def save_report(plan: Plan | PatchResult, folder: str | Path, outcome="scanned", error="") -> Path:
     """Explicit report-only export also works for blocked scans; contains no ARXML."""
-    output = _report_path(plan, folder)
+    if isinstance(plan, PatchResult):
+        report = copy.deepcopy(plan.report)
+        report["revert_available"] = plan.can_revert
+        if error:
+            report["errors"].append(error)
+    else:
+        report = plan.report(outcome, error)
+    output = _report_path(report, folder)
     output.parent.mkdir(parents=True, exist_ok=True)
     stage = Path(tempfile.mkdtemp(prefix=".arxml-report-", dir=output.parent))
     try:
-        _write_reports(stage, plan.report(outcome, error))
+        _write_reports(stage, report)
         _publish(stage, output)
     finally:
         if stage.exists():
@@ -231,4 +239,4 @@ def apply_patch(plan: Plan, xsd: str | Path | None = None) -> PatchResult:
         "unrelated_content_preserved": True,
         "second_scan_add": repeat.summary["ADD"],
     }
-    return commit_changes(plan, serialized, changed, report, _write_reports)
+    return commit_changes(plan, serialized, changed, report)

@@ -13,16 +13,20 @@ python -m pip install -r requirements.txt
 python main.py
 ```
 
-1. Select **Master ARXML Folder** (the existing set to update) and **Source ARXML
-   Folder** (generated definitions). ARXML files are discovered recursively, regardless of names
+1. Select **Master folder (to update)** (the existing set to update) and **Source folder (generated ARXML)** (generated definitions). ARXML files are discovered recursively, regardless of names
    or extension case. Definitions and dependencies can reside in different files.
-2. Click **Scan & Compare**. This creates no output. Select rows to inspect full
+2. Click **Preview Changes**. This creates no output. Select rows to inspect full
    paths, reasons and dependencies. Scan again after changing either input.
+   When preflight passes with no supported additions, a **No changes needed** popup
+   confirms the result and shows the number of equivalent items found in Master.
 3. Optionally select a matching XSD file with all local include/import files.
-4. Click **Apply to Master**. It is enabled only when preflight passes and additions
+4. Click **Update Master**. It is enabled only when preflight passes and additions
    exist. The tool validates the complete result before modifying any Master file.
-   The success message shows the automatic backup and report location. Scan again
-   to refresh the results after Apply.
+   The success message confirms that session undo is available. Scan again to refresh
+   the results after updating Master.
+   The success message states whether XSD validation passed or was not run.
+5. Click **Undo Last Update** to restore the previous files and their **Date modified**
+   timestamps. This is available only while the same application session stays open.
 
 **Save Report** exports `patch_report.txt` and `patch_report.json` separately,
 including for blocked scans or failed applications. It does not export ARXML.
@@ -48,9 +52,10 @@ requires scanning again before Apply.
 - Add a missing `VARIABLE-ACCESS` on an existing runnable, preserving its mode:
   implicit read/write, explicit receive by argument/value, or explicit send.
 
-All matches use fully qualified AUTOSAR paths. The whole Source node is copied,
-including UUID, DEST, init values and properties. Different UUIDs or other
-technical attributes are conflicts, even when names match. Formatting-only
+All matches use fully qualified AUTOSAR paths. Source/Master comparisons ignore
+UUID attributes throughout each compared subtree, including datatype and constant
+dependencies. Existing Master objects retain their UUIDs. Other technical
+attributes, DEST, init values and properties remain significant. Formatting-only
 whitespace, XML comments, namespace prefixes and attribute ordering are ignored
 when comparing; meaningful text and child order remain significant.
 
@@ -58,6 +63,19 @@ when comparing; meaningful text and child order remain significant.
 identity differs; `UNSUPPORTED` means outside the supported operation or a missing
 dependency. Any error, conflict or unsupported record blocks the **entire** patch.
 There is no selective conflict bypass.
+
+New nodes retain their Source UUIDs when available and unique. UUID collisions
+with Master or other planned additions, and empty UUID attributes on copied nodes,
+are replaced with UUIDv4 values during Scan. Apply uses those planned values.
+Missing UUID attributes stay optional. DCE UUID case and prefix variations are
+recognized as the same identifier. Custom identifier namespaces are compared
+literally. Source may contain duplicate UUIDs because only accepted additions
+are copied and repaired; duplicate object paths still block the scan.
+Master UUID collisions block the scan, except repeated declarations of the same
+AR-PACKAGE across files. JSON reports include a `uuid_changes` list with the owning
+operation, source and target files, source XML node path, old/new UUID and reason.
+An empty list means no UUID reassignment was planned. ADD reasons include a count
+of reassigned UUIDs. UUID-only differences produce EXISTS and require no write.
 
 Datatypes, constants and their reachable reference dependencies must already exist
 in Master. If Source also defines a dependency, it must agree with Master.
@@ -72,7 +90,7 @@ Unknown data access modes always block the patch, including when their access
 node matches Master. Unchanged accesses in the known read/write local-variable
 containers may coexist with the supported S/R changes.
 
-## In-place updates, backups and validation
+## In-place updates, session Revert and validation
 
 Only changed Master ARXML files are replaced. Other ARXML and generated artifacts
 such as C, headers and A2L retain their original bytes. Modified files are serialized as XML
@@ -85,33 +103,50 @@ port direction and interface membership, verified container order, unrelated
 content preservation, reparsing, and a second scan with `ADD = 0`. All checks,
 including optional XSD validation, finish in memory before writing Master.
 
-An automatic backup is created at
-`<Master parent>/.arxml-patcher-backups/<Master name>-<unique ID>/`.
-It contains `originals/<relative ARXML path>.bak` for each changed file,
-`patch_report.txt`, `patch_report.json`, and `transaction.json` with file hashes
-and transaction state. Backups use `.bak` extensions and live outside Master,
-so recursive ARXML scans do not index them as duplicate definitions.
+Apply retains the original bytes, file modes and modification timestamps of changed
+files in RAM. **Undo Last Update** restores those exact bytes and **Date modified**
+values using nanosecond timestamps, then verifies them. File creation timestamps
+and filesystem change logs follow operating-system behavior.
 
-Each file is flushed to a temporary sibling and replaced atomically. A failure
-during the sequence triggers rollback of files already written. If a file was
-changed externally or cannot be restored, backup files are retained and the
-transaction is marked `recovery_required`; subsequent Apply attempts are blocked.
-A lock also prevents two tool instances from patching the same Master at once.
-The GUI waits for an active operation to finish before allowing normal close.
+The GUI retains one undo result for the latest successful Apply. Scanning again or
+changing Source preserves it. Select the corresponding Master folder to enable
+Revert. A later successful Apply replaces the previous undo result. Closing the app,
+process termination or power loss discards the in-memory originals. The CLI discards
+undo data when the command exits. Use the GUI or a live Python API session when
+session Revert is needed. Multi-file writes can be interrupted by process termination
+or power loss, and recovery then depends on independently retained originals.
 
-Replacing multiple files is not a single filesystem transaction: forced process
-termination or power loss may interrupt it. After such an interruption, inspect
-the backup's journal and compare the current files against the stored original
-and patched hashes. Restore the listed `.bak` files to their corresponding Master
-paths if rolling back, then mark the journal `rolled_back`. Remove a leftover
-`<Master name>.lock` only after ensuring no patch process is still running and
-recovery is complete. Scan again before applying further changes. Never overwrite
-independent edits made after the interrupted patch without reviewing them.
+Every changed file is flushed to a temporary sibling and replaced atomically. Apply
+and Revert take the same exclusive Master lock. Before Revert writes anything, all
+changed files must match their expected bytes, modification times and modes. External
+edits, missing files or linked file paths block Revert. Other Master files and Source
+are outside the Revert operation, so Source can be moved or removed after Apply.
+
+An ordinary write failure triggers rollback to the state before that operation,
+including modification timestamps. If rollback is incomplete, the result enters
+`recovery_required` and retains the originals in memory. Further Apply operations on
+that Master in the same process are blocked. Keep the GUI open and retry **Revert
+Last Apply** after resolving the reported file access problem. The GUI blocks normal
+close during active operations and incomplete recovery. The Python API exposes the
+same recovery result through `TransactionError.result`.
+
+Reports are saved explicitly through **Save Report** or CLI `--report`. Apply and
+Revert keep their reports in memory until exported. JSON reports include the actual
+operation outcome, undo storage mode, original modification times and validation
+results. `revert_available` describes availability in the exporting process only.
+After Revert, `post_revert_validation` records byte/timestamp restoration and
+`apply_xsd_validated` records the earlier Apply's XSD result.
+
+The temporary lock is `<Master parent>/.<Master name>.arxml-patcher.lock` and is removed
+on normal completion. After a forced process exit, remove a leftover lock only after
+ensuring the operation has stopped and reviewing the Master files. Existing backups
+from older releases are retained. An unfinished legacy transaction or legacy lock
+still blocks writes until its recovery is resolved.
 
 **Schema support is deliberately limited to namespace
 `http://autosar.org/schema/r4.0` with `AUTOSAR_00047.xsd` in `xsi:schemaLocation`.**
 Other/unspecified revisions, foreign element namespaces, DTD/entities, ambiguous
-non-package definitions, duplicate UUIDs and linked input directories are rejected.
+non-package definitions, duplicate Master UUIDs and linked input directories are rejected.
 AR-PACKAGE definitions may be distributed across files. See
 [XML mapping and ordering evidence](docs/xml-mapping.md).
 
@@ -130,7 +165,7 @@ No arguments opens the GUI. The source entry point also supports automation:
 # Scan only, optionally saving reports to a separate new/empty directory.
 python main.py --master 'C:\data\Master' --source 'C:\data\Source' --report 'C:\data\ScanReport'
 
-# Update Master in place with backup and optional full XSD validation.
+# Update Master in place with optional full XSD validation and session-only undo.
 python main.py --master 'C:\data\Master' --source 'C:\data\Source' `
   --apply --xsd 'C:\schemas\AUTOSAR_00047.xsd'
 ```
@@ -140,11 +175,25 @@ validation/write, invalid arguments, or no additions when `--apply` is requested
 The packaged windowed executable is intended for GUI use; use Python for console
 output and command-line automation.
 
-Migration from the earlier copy-output MVP: remove `--output` from commands.
-`--master` is now the set modified by `--apply`. The Python API is now
-`apply_patch(plan, xsd=None)` and returns a `PatchResult` with `master_folder`,
-`backup_folder` and `changed_files`. Applications needing a separate patched copy
-can copy Master themselves and select that copy as Master.
+Migration from disk-backed backups: `PatchResult.backup_folder` has been removed.
+`apply_patch(plan, xsd=None)` returns a session-only `PatchResult` with
+`master_folder`, `source_folder`, `changed_files`, `report` and `can_revert`.
+Keep that result alive and call `revert_patch(result)` in the same process.
+`save_report(result, folder)` exports the actual Apply/Revert report, including XSD
+validation status. `save_report(plan, folder)` continues to export scan reports.
+
+```python
+from diff_engine import scan
+from patch_engine import apply_patch, revert_patch, save_report
+
+result = apply_patch(scan(master_folder, source_folder), xsd=schema_path)
+save_report(result, report_folder)
+revert_patch(result)
+```
+
+For the older copy-output CLI, remove `--output` from commands. `--master` is the
+set modified by `--apply`. Applications needing a separate patched copy can copy
+Master themselves and select that copy as Master.
 
 ## Development and Windows packaging
 
@@ -159,7 +208,7 @@ python -m ruff format --check .
 `build.bat` runs tests and lint before producing `dist/AUTOSAR-SR-Patcher.exe`
 with PyInstaller. Tk tests need a working graphical desktop and skip if no
 display is available. Standard automated fixtures cover TC01–TC20, both R/P
-directions, all five access modes, blocked writes, backup/rollback, input changes, GUI
+directions, all five access modes, blocked writes, session Revert, rollback, input changes, GUI
 callbacks, CLI and report generation. Fixtures are generated in temporary
 directories by `tests/conftest.py`; no user ARXML is committed.
 
