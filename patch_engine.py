@@ -32,15 +32,10 @@ def report_text(report: dict) -> str:
     ]
     lines.extend("ERROR: " + e for e in report["errors"])
     for row in report["records"]:
-        lines.extend(
-            [
-                f"[{row['Action']}] {row['Category']} {row['ObjectPath']}",
-                f"  {row['Reason']}",
-                f"  Source: {row['SourceFile']}",
-                f"  Target: {row['TargetFile'] or '(none)'}",
-                "  Dependencies: " + (", ".join(row["Dependencies"]) or "(none)"),
-            ]
-        )
+        if row["Action"] != "EXISTS":
+            lines.append(
+                f"[{row['Action']}] {row['Category']} {row['ObjectPath']}: {row['Reason']}"
+            )
     return "\n".join(lines) + "\n"
 
 

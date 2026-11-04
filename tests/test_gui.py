@@ -45,7 +45,8 @@ def settle(app):
 
 
 def test_gui_scan_apply_and_stale_input(inputs, app):
-    master, source, output = inputs(source_elements=element())
+    existing = element("Old")
+    master, source, output = inputs(master_elements=existing, source_elements=existing + element())
     application, messages = app
     assert str(application.apply_button["state"]) == "disabled"
     for name, path in [("Master", master), ("Source", source)]:
@@ -54,7 +55,12 @@ def test_gui_scan_apply_and_stale_input(inputs, app):
     settle(application)
     assert application.plan.valid
     assert str(application.apply_button["state"]) == "normal"
-    assert len(application.tree.get_children()) == 1
+    (row,) = application.tree.get_children()
+    assert application.tree.set(row, "Status") == "ADD"
+    assert "Exists: 1" in application.summary.get()
+    application.tree.selection_set(row)
+    application.show_detail()
+    assert "Dependencies: /Pkg/Value" in application.detail.get("1.0", "end")
     assert not output.exists()
     application.apply_button.invoke()
     settle(application)
@@ -63,12 +69,18 @@ def test_gui_scan_apply_and_stale_input(inputs, app):
     assert str(application.apply_button["state"]) == "disabled"
     assert list((master.parent / ".arxml-patcher-backups").glob("*/patch_report.json"))
     assert messages[-1][0] == "Patch complete"
+    application.scan_button.invoke()
+    settle(application)
+    assert not application.tree.get_children()
+    assert "Exists: 2" in application.summary.get()
     application.paths["Source"].set(str(source / "changed"))
     assert str(application.apply_button["state"]) == "disabled"
 
 
 def test_gui_blocks_invalid_preflight_and_can_save_report(inputs, app, monkeypatch):
-    master, source, output = inputs(source_elements=element(dtype="/Pkg/Missing"))
+    master, source, output = inputs(
+        source_elements=element("Blocked", dtype="/Pkg/Missing") + element()
+    )
     application, _ = app
     application.paths["Master"].set(str(master))
     application.paths["Source"].set(str(source))
@@ -76,6 +88,9 @@ def test_gui_blocks_invalid_preflight_and_can_save_report(inputs, app, monkeypat
     settle(application)
     assert not application.plan.valid
     assert str(application.apply_button["state"]) == "disabled"
+    rows = application.tree.get_children()
+    assert [application.tree.set(row, "Status") for row in rows] == ["UNSUPPORTED", "ADD"]
+    assert "Missing dependency in Master" in application.tree.set(rows[0], "Reason")
     report = output.parent / "report"
     monkeypatch.setattr(gui.filedialog, "askdirectory", lambda **kw: str(report))
     application.report_button.invoke()

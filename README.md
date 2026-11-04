@@ -26,6 +26,9 @@ python main.py
 
 **Save Report** exports `patch_report.txt` and `patch_report.json` separately,
 including for blocked scans or failed applications. It does not export ARXML.
+The GUI, CLI and text reports list additions and blockers. Equivalent items
+(`EXISTS`) appear as a count only. Text reports show one line per item, and
+JSON reports retain every record with its file paths and dependencies.
 Source is read-only. Master and Source must be separate folders with no nesting.
 Scan snapshots are checked again before writing, so changes made by code generation
 or another process require a fresh scan. There is no Output Folder to select.

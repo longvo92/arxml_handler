@@ -210,8 +210,9 @@ class Application(ttk.Frame):
     def display_plan(self):
         self.tree.delete(*self.tree.get_children())
         self.rows.clear()
-        order = {"CONFLICT": 0, "UNSUPPORTED": 1, "ADD": 2, "EXISTS": 3}
-        for record in sorted(self.plan.records, key=lambda r: order[r.Action]):
+        order = {"CONFLICT": 0, "UNSUPPORTED": 1, "ADD": 2}
+        visible = (record for record in self.plan.records if record.Action in order)
+        for record in sorted(visible, key=lambda r: order[r.Action]):
             row = self.tree.insert(
                 "",
                 "end",
