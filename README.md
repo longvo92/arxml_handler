@@ -48,9 +48,10 @@ requires scanning again before Apply.
 - Add a missing `VARIABLE-ACCESS` on an existing runnable, preserving its mode:
   implicit read/write, explicit receive by argument/value, or explicit send.
 
-All matches use fully qualified AUTOSAR paths. The whole Source node is copied,
-including UUID, DEST, init values and properties. Different UUIDs or other
-technical attributes are conflicts, even when names match. Formatting-only
+All matches use fully qualified AUTOSAR paths. Source/Master comparisons ignore
+UUID attributes throughout each compared subtree, including datatype and constant
+dependencies. Existing Master objects retain their UUIDs. Other technical
+attributes, DEST, init values and properties remain significant. Formatting-only
 whitespace, XML comments, namespace prefixes and attribute ordering are ignored
 when comparing; meaningful text and child order remain significant.
 
@@ -58,6 +59,19 @@ when comparing; meaningful text and child order remain significant.
 identity differs; `UNSUPPORTED` means outside the supported operation or a missing
 dependency. Any error, conflict or unsupported record blocks the **entire** patch.
 There is no selective conflict bypass.
+
+New nodes retain their Source UUIDs when available and unique. UUID collisions
+with Master or other planned additions, and empty UUID attributes on copied nodes,
+are replaced with UUIDv4 values during Scan. Apply uses those planned values.
+Missing UUID attributes stay optional. DCE UUID case and prefix variations are
+recognized as the same identifier. Custom identifier namespaces are compared
+literally. Source may contain duplicate UUIDs because only accepted additions
+are copied and repaired; duplicate object paths still block the scan.
+Master UUID collisions block the scan, except repeated declarations of the same
+AR-PACKAGE across files. JSON reports include a `uuid_changes` list with the owning
+operation, source and target files, source XML node path, old/new UUID and reason.
+An empty list means no UUID reassignment was planned. ADD reasons include a count
+of reassigned UUIDs. UUID-only differences produce EXISTS and require no write.
 
 Datatypes, constants and their reachable reference dependencies must already exist
 in Master. If Source also defines a dependency, it must agree with Master.
@@ -111,7 +125,7 @@ independent edits made after the interrupted patch without reviewing them.
 **Schema support is deliberately limited to namespace
 `http://autosar.org/schema/r4.0` with `AUTOSAR_00047.xsd` in `xsi:schemaLocation`.**
 Other/unspecified revisions, foreign element namespaces, DTD/entities, ambiguous
-non-package definitions, duplicate UUIDs and linked input directories are rejected.
+non-package definitions, duplicate Master UUIDs and linked input directories are rejected.
 AR-PACKAGE definitions may be distributed across files. See
 [XML mapping and ordering evidence](docs/xml-mapping.md).
 

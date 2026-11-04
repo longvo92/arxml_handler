@@ -3,6 +3,7 @@
 import os
 import shutil
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 from lxml import etree as ET
@@ -79,6 +80,49 @@ def test_real_generated_definitions_all_three_features(real_data, tmp_path):
     assert all(plan.summary[k] > 0 for k in ["DataElement", "ComSpec", "RunnableAccess"])
     output = apply_patch(plan, os.getenv("AUTOSAR_XSD")).master_folder
     assert scan(output, source).summary["ADD"] == 0
+
+
+def test_real_uuid_collision_and_dependency_regeneration(real_data, tmp_path):
+    master, generated = real_data
+    initial = scan(master, generated)
+    assert initial.valid, initial.report()
+    additions = [op for op in initial.operations if op.record.Category == "DataElement"]
+    if not additions:
+        pytest.skip("Generated sample needs a new data element for UUID repair coverage")
+    source = tmp_path / "source-with-regenerated-uuids"
+    shutil.copytree(generated, source)
+    master_data, source_data = Dataset.load(master), Dataset.load(source)
+    new_element = source_data.objects[additions[0].record.ObjectPath]
+    existing = next(obj for obj in master_data.objects_of("VARIABLE-DATA-PROTOTYPE"))
+    collision = str(uuid4())
+    existing.node.set("UUID", collision)
+    new_element.node.set("UUID", collision)
+    dtype_path = value(new_element.node, "TYPE-TREF")
+    master_type, source_type = master_data.objects[dtype_path], source_data.objects[dtype_path]
+    master_type.node.set("UUID", str(uuid4()))
+    source_type.node.set("UUID", str(uuid4()))
+    for dataset, files in (
+        (master_data, {existing.file, master_type.file}),
+        (source_data, {new_element.file, source_type.file}),
+    ):
+        for file in files:
+            dataset.documents[file].tree.write(
+                str(dataset.folder / file), encoding="UTF-8", xml_declaration=True
+            )
+    source_before = Dataset.load(source, allow_duplicate_uuids=True).manifest()
+    plan = scan(master, source)
+    assert plan.valid, plan.report()
+    assert len(plan.uuid_changes) == 1
+    expected_uuid = plan.uuid_changes[0].NewUUID
+    result = apply_patch(plan, os.getenv("AUTOSAR_XSD"))
+    patched = Dataset.load(master)
+    assert not patched.errors
+    assert patched.objects[existing.path].node.get("UUID") == collision
+    assert patched.objects[new_element.path].node.get("UUID") == expected_uuid
+    assert (result.backup_folder / "patch_report.json").exists()
+    assert Dataset.load(source, allow_duplicate_uuids=True).manifest() == source_before
+    repeated = scan(master, source)
+    assert repeated.valid and repeated.summary["ADD"] == 0
 
 
 @pytest.mark.parametrize("component_name", ["ActuatorAdapter", "Controller", "SensorAdapter"])

@@ -6,6 +6,7 @@ import pytest
 from conftest import element
 
 import gui
+from arxml_parser import Dataset
 from diff_engine import scan
 
 
@@ -106,3 +107,29 @@ def test_gui_prevents_normal_close_during_write(app):
     assert application.root.winfo_exists()
     assert "wait" in application.status.get()
     application.busy = False
+
+
+def test_gui_uuid_reassignment_preview_matches_apply(inputs, app):
+    identifier = "11111111-1111-4111-8111-111111111111"
+    old = element("Old").replace(
+        "<VARIABLE-DATA-PROTOTYPE>", f'<VARIABLE-DATA-PROTOTYPE UUID="{identifier}">'
+    )
+    new = element().replace(
+        "<VARIABLE-DATA-PROTOTYPE>", f'<VARIABLE-DATA-PROTOTYPE UUID="{identifier}">'
+    )
+    master, source, _ = inputs(master_elements=old, source_elements=old + new)
+    application, _ = app
+    application.paths["Master"].set(str(master))
+    application.paths["Source"].set(str(source))
+    application.scan_button.invoke()
+    settle(application)
+    assert application.plan.valid
+    (change,) = application.plan.uuid_changes
+    (row,) = application.tree.get_children()
+    assert "reassigned 1 UUID(s)" in application.tree.set(row, "Reason")
+    assert str(application.apply_button["state"]) == "normal"
+    application.apply_button.invoke()
+    settle(application)
+    patched = Dataset.load(master)
+    assert patched.objects["/Pkg/If/Old"].node.get("UUID") == identifier
+    assert patched.objects["/Pkg/If/New"].node.get("UUID") == change.NewUUID

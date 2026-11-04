@@ -6,6 +6,7 @@ import hashlib
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from uuid import UUID
 
 from lxml import etree as ET
 
@@ -37,8 +38,21 @@ def descendants(node: ET._Element, name: str) -> list[ET._Element]:
     return list(node.iter(f"{{{NS}}}{name}"))
 
 
-def semantic(node: ET._Element) -> tuple:
-    """Ignore indentation, comments and attribute order; retain every XML attribute.
+def uuid_key(value: str) -> str:
+    """Recognize equivalent DCE UUID spellings; retain opaque identifier namespaces."""
+    identifier = value.strip()
+    if identifier[:4].upper() == "DCE:":
+        identifier = identifier[4:]
+    if ":" in identifier:
+        return value
+    try:
+        return "DCE:" + str(UUID(identifier))
+    except ValueError:
+        return value
+
+
+def semantic(node: ET._Element, *, ignore_uuid: bool = False) -> tuple:
+    """Ignore XML presentation; optionally ignore UUID during Source/Master comparison.
 
     Leaf text and mixed content are retained (including significant spaces).
     Namespace prefixes do not participate in identity; expanded names do.
@@ -57,7 +71,7 @@ def semantic(node: ET._Element) -> tuple:
         if isinstance(sub.tag, str):
             if preserve or text.strip():
                 content.append(("text", text))
-            content.append(("element", semantic(sub)))
+            content.append(("element", semantic(sub, ignore_uuid=ignore_uuid)))
             text = sub.tail or ""
         else:
             # Ignore a comment/PI while retaining any meaningful text after it.
@@ -66,7 +80,7 @@ def semantic(node: ET._Element) -> tuple:
         content.append(("text", text))
     return (
         node.tag,
-        tuple(sorted(node.attrib.items())),
+        tuple(sorted((k, v) for k, v in node.attrib.items() if not (ignore_uuid and k == "UUID"))),
         tuple(content),
     )
 
@@ -107,10 +121,13 @@ class Dataset:
     paths: dict[ET._Element, str] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
     versions: set[str] = field(default_factory=set)
+    allow_duplicate_uuids: bool = False
 
     @classmethod
-    def load(cls, folder: str | Path) -> Dataset:
-        result = cls(Path(folder).expanduser().resolve())
+    def load(cls, folder: str | Path, *, allow_duplicate_uuids: bool = False) -> Dataset:
+        result = cls(
+            Path(folder).expanduser().resolve(), allow_duplicate_uuids=allow_duplicate_uuids
+        )
         if not result.folder.is_dir():
             result.errors.append(f"ARXML folder does not exist: {result.folder}")
             return result
@@ -172,7 +189,7 @@ class Dataset:
     def reindex(self) -> None:
         self.objects.clear()
         self.paths.clear()
-        uuids: dict[str, tuple[Path, str]] = {}
+        uuids: dict[str, tuple[Path, str, str]] = {}
 
         def visit(node: ET._Element, prefix: str, file: Path) -> None:
             if not tag(node):
@@ -206,10 +223,17 @@ class Dataset:
                 elif old is None:
                     self.objects[path] = Object(path, file, node)
             uuid = node.get("UUID")
-            if uuid and tag(node) != "AR-PACKAGE":
-                if uuid in uuids:
-                    self.errors.append(f"Duplicate UUID {uuid}: {uuids[uuid]}, {(file, path)}")
-                uuids[uuid] = (file, path)
+            if uuid and not self.allow_duplicate_uuids:
+                key = uuid_key(uuid)
+                previous = uuids.get(key)
+                split_package = (
+                    previous is not None
+                    and previous[1:] == (path, "AR-PACKAGE")
+                    and tag(node) == "AR-PACKAGE"
+                )
+                if previous is not None and not split_package:
+                    self.errors.append(f"Duplicate UUID {uuid}: {previous}, {(file, path)}")
+                uuids[key] = (file, path, tag(node))
             for sub in node:
                 visit(sub, path, file)
 
@@ -220,7 +244,7 @@ class Dataset:
         return [o for o in self.objects.values() if tag(o.node) == kind]
 
     def assert_unchanged(self) -> None:
-        current = Dataset.load(self.folder)
+        current = Dataset.load(self.folder, allow_duplicate_uuids=self.allow_duplicate_uuids)
         if current.errors or set(current.documents) != set(self.documents):
             raise PatcherError(f"Input folder changed after scan; scan again: {self.folder}")
         if any(current.documents[p].original != d.original for p, d in self.documents.items()):

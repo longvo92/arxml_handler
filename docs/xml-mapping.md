@@ -37,9 +37,22 @@ receive-by-value, send and write containers precede `SERVER-CALL-POINTS` and
 elements precede invalidation policies. An unknown parent child blocks insertion.
 Other schema revisions are explicitly unsupported until their profiles are verified.
 
-All copied attributes, including UUID and DEST, are significant. XML indentation,
-namespace prefix choice, comments and attribute ordering do not affect equivalence.
-Child order and meaningful text do. No implicit/explicit conversion is performed.
+Source/Master equivalence ignores UUID attributes recursively, including reachable
+dependency definitions. DEST, other attributes, child order and meaningful text
+remain significant. XML indentation, namespace prefix choice, comments and attribute
+ordering do not affect equivalence. Existing Master UUIDs are preserved.
+No implicit/explicit conversion is performed.
+
+Scan prepares independent copies of accepted additions. Copied UUIDs that collide
+with Master or earlier additions, and empty UUID attributes, receive UUIDv4 values.
+Generated values avoid every UUID found in both input sets and the plan. UUIDs absent
+from Source remain absent. DCE UUID case/prefix variants share one collision key;
+opaque identifier namespaces retain literal identity. Apply inserts exactly these
+prepared nodes and verifies their complete attributes. Preservation and serialization
+proofs continue to compare UUIDs strictly. JSON `uuid_changes` entries describe planned
+reassignments, including source XML paths for nested nodes. Source duplicate UUIDs
+are tolerated during scan and stale-input checking; Master duplicates block patching
+except split declarations of the same AR-PACKAGE. Input files remain unchanged by Scan.
 
 References are resolved across the Master set plus accepted new data elements.
 Dependency definitions such as datatypes and constants must already exist; if

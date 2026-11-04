@@ -3,12 +3,24 @@
 from __future__ import annotations
 
 from collections import Counter
+from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from uuid import uuid4
 
 from lxml import etree as ET
 
-from arxml_parser import Dataset, Object, child, children, descendants, semantic, tag, value
+from arxml_parser import (
+    Dataset,
+    Object,
+    child,
+    children,
+    descendants,
+    semantic,
+    tag,
+    uuid_key,
+    value,
+)
 from schema_profile import ACCESS_CONTAINERS, COMSPECS
 from validator import check_access, check_dependencies, check_order
 
@@ -33,12 +45,24 @@ class Operation:
 
 
 @dataclass
+class UuidChange:
+    ObjectPath: str
+    SourceFile: str
+    TargetFile: str
+    NodePath: str
+    OldUUID: str
+    NewUUID: str
+    Reason: str
+
+
+@dataclass
 class Plan:
     master: Dataset
     source: Dataset
     records: list[Record] = field(default_factory=list)
     operations: list[Operation] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    uuid_changes: list[UuidChange] = field(default_factory=list)
 
     @property
     def valid(self) -> bool:
@@ -75,12 +99,15 @@ class Plan:
             ),
             "errors": self.errors + ([error] if error else []),
             "records": [asdict(r) for r in self.records],
+            "uuid_changes": [asdict(change) for change in self.uuid_changes],
             "input_sha256": {"master": self.master.manifest(), "source": self.source.manifest()},
         }
 
 
 def scan(master_folder: str | Path, source_folder: str | Path) -> Plan:
-    return compare(Dataset.load(master_folder), Dataset.load(source_folder))
+    return compare(
+        Dataset.load(master_folder), Dataset.load(source_folder, allow_duplicate_uuids=True)
+    )
 
 
 def compare(master: Dataset, source: Dataset) -> Plan:
@@ -92,7 +119,16 @@ def compare(master: Dataset, source: Dataset) -> Plan:
         return plan
     available = dict(master.objects)
     used_uuids = {
-        n.get("UUID") for d in master.documents.values() for n in d.tree.iter() if n.get("UUID")
+        uuid_key(n.get("UUID"))
+        for d in master.documents.values()
+        for n in d.tree.iter()
+        if n.get("UUID")
+    }
+    reserved_uuids = used_uuids | {
+        uuid_key(n.get("UUID"))
+        for d in source.documents.values()
+        for n in d.tree.iter()
+        if n.get("UUID")
     }
 
     def emit(category, path, action, src, target, reason, deps=None):
@@ -112,7 +148,9 @@ def compare(master: Dataset, source: Dataset) -> Plan:
         if category in {"DataElement", "RunnableAccess"} and not value(node, "SHORT-NAME"):
             return emit(category, path, "UNSUPPORTED", src, target, "Missing SHORT-NAME")
         if existing:
-            if len(existing) == 1 and semantic(existing[0]) == semantic(node):
+            if len(existing) == 1 and semantic(existing[0], ignore_uuid=True) == semantic(
+                node, ignore_uuid=True
+            ):
                 if extra_error:
                     return emit(category, path, "UNSUPPORTED", src, target, extra_error)
                 return emit(category, path, "EXISTS", src, target, "Already defined equivalently")
@@ -137,16 +175,38 @@ def compare(master: Dataset, source: Dataset) -> Plan:
             return emit(
                 category, path, "CONFLICT" if conflict else "UNSUPPORTED", src, target, error, deps
             )
-        uuids = [n.get("UUID") for n in node.iter() if n.get("UUID")]
-        if len(uuids) != len(set(uuids)) or any(u in used_uuids for u in uuids):
-            return emit(
-                category, path, "CONFLICT", src, target, "Copied UUID is already in use", deps
-            )
-        used_uuids.update(uuids)
-        record = emit(
-            category, path, "ADD", src, target, "Missing in Master; dependencies resolved", deps
-        )
-        plan.operations.append(Operation(record, node, target.path, container))
+        planned_node = deepcopy(node)
+        changes = []
+        for original, planned in zip(node.iter(), planned_node.iter(), strict=True):
+            identifier = original.get("UUID")
+            if identifier is None:
+                continue
+            key = uuid_key(identifier)
+            if not identifier.strip() or key in used_uuids:
+                replacement = str(uuid4())
+                while uuid_key(replacement) in reserved_uuids:
+                    replacement = str(uuid4())
+                planned.set("UUID", replacement)
+                changes.append(
+                    UuidChange(
+                        path,
+                        str(src.file),
+                        str(target.file),
+                        original.getroottree().getpath(original),
+                        identifier,
+                        replacement,
+                        "Empty UUID" if not identifier.strip() else "UUID already in use",
+                    )
+                )
+                key = uuid_key(replacement)
+                reserved_uuids.add(key)
+            used_uuids.add(key)
+        plan.uuid_changes.extend(changes)
+        reason = "Missing in Master; dependencies resolved"
+        if changes:
+            reason += f"; reassigned {len(changes)} UUID(s)"
+        record = emit(category, path, "ADD", src, target, reason, deps)
+        plan.operations.append(Operation(record, planned_node, target.path, container))
         return record
 
     # Feature 1. Only these accepted additions extend the dependency view.
@@ -218,7 +278,9 @@ def compare(master: Dataset, source: Dataset) -> Plan:
         interface_obj = source.objects.get(interface) or available.get(interface)
         is_sr = interface_obj is not None and tag(interface_obj.node) == "SENDER-RECEIVER-INTERFACE"
         if not is_sr or kind == "PR-PORT-PROTOTYPE":
-            if target is None or semantic(src.node) != semantic(target.node):
+            if target is None or semantic(src.node, ignore_uuid=True) != semantic(
+                target.node, ignore_uuid=True
+            ):
                 emit(
                     "ComSpec",
                     src.path,
@@ -367,7 +429,8 @@ def compare(master: Dataset, source: Dataset) -> Plan:
                         mode in {"READ-LOCAL-VARIABLES", "WRITTEN-LOCAL-VARIABLES"}
                         and len(same_name) == 1
                         and tag(same_name[0].getparent()) == mode
-                        and semantic(same_name[0]) == semantic(node)
+                        and semantic(same_name[0], ignore_uuid=True)
+                        == semantic(node, ignore_uuid=True)
                     ):
                         continue
                     emit(
