@@ -35,6 +35,8 @@ def main(argv=None) -> int:
     report_target = plan
     try:
         print(", ".join(f"{k}={v}" for k, v in plan.summary.items()))
+        for warning in plan.warnings:
+            print(f"WARNING: {warning}")
         for error in plan.errors:
             print(f"ERROR: {error}", file=sys.stderr)
         for row in plan.records:

@@ -55,9 +55,14 @@ are tolerated during scan and stale-input checking; Master duplicates block patc
 except split declarations of the same AR-PACKAGE. Input files remain unchanged by Scan.
 
 References are resolved across the Master set plus accepted new data elements.
-Dependency definitions such as datatypes and constants must already exist; if
-also supplied by Source, their definitions must agree with Master. Missing or
-incompatible dependencies block Apply. Unrelated existing references are not
+Supported package-level datatype/value dependencies may be imported from Source;
+existing definitions must agree, ignoring UUID. Other dependency kinds must already
+exist in Master. A virtual Master resolves forward/shared/cyclic references before
+leaf planning. Interface and port subtree imports own their children, preventing
+separate duplicate data-element/ComSpec operations. Mapping sets merge only entries
+needed by the owning component's S/R interfaces; explicit Source owner references
+are added without copying unrelated mappings. Incompatible dependencies block Apply.
+Unrelated existing references are not
 claimed to be fully integration-validated. Optional user-provided XSD validation
 checks all resulting documents; structural/reference checks alone are not full
 AUTOSAR schema or RTE/BSW integration validation.
@@ -68,3 +73,26 @@ Revert. Revert verifies all changed files before restoring original bytes and ti
 Ordinary failures roll back the current operation, and incomplete recovery retains
 its result in memory for retry. Reports are exported explicitly. Source stays
 read-only. See the README for session lifetime, interruption handling and API migration.
+
+## Architecture additions
+
+Package owners are resolved across all document fragments. A unique package file
+receives new definitions; absent or split packages use `sr_patcher_additions.arxml`.
+Package scaffolds contain SHORT-NAME and the required child containers, without
+copying unrelated package metadata. Existing files are extended and retain their
+unrelated content. Ports go under existing component `PORTS`, mappings under
+`DATA-TYPE-MAPS` / `DATA-TYPE-MAPPING-REFS`, and assembly/delegation connectors under
+existing composition `CONNECTORS`. Owner child sequences are expanded from XSD 00047.
+
+Connector instance paths must belong to the containing composition, and each
+endpoint must belong to its instance's TYPE-TREF component. Assembly connects P to R;
+delegation connects equal directions, with the outer port on the composition itself.
+Endpoint interfaces must resolve to the same Sender-Receiver interface. Connection
+identity also includes instance contexts, so distinct instances of the same SWC type
+remain distinct. Only Source-declared connectors are imported. Missing connectivity
+is reported as a warning for newly imported ports.
+
+Reference discovery uses leaf REF/TREF nodes: delegation's
+`P-PORT-IN-COMPOSITION-INSTANCE-REF` and R counterpart are containers, not references.
+New-file transactions record an absent original state. Undo/rollback remove those
+files with the same external-change checks used when restoring existing files.

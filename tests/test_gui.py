@@ -215,3 +215,32 @@ def test_gui_retains_partial_apply_for_recovery(inputs, app, monkeypatch):
     settle(application)
     assert Dataset.load(master).manifest() == before
     assert messages[-1][0] == "Undo complete"
+
+
+def test_gui_architecture_preview_and_undo(tmp_path, app):
+    from conftest import DATATYPE, interface
+    from test_architecture import datasets
+
+    from architecture import ADDITIONS_FILE
+    from patch_engine import apply_patch, revert_patch
+
+    master, source = datasets(
+        tmp_path,
+        component(ports=False),
+        DATATYPE + interface(element()) + component(),
+        split=True,
+    )
+    application, _ = app
+    application.paths["Master"].set(str(master))
+    application.paths["Source"].set(str(source))
+    application.plan = scan(master, source)
+    application.display_plan()
+    rows = [application.tree.item(r, "values") for r in application.tree.get_children()]
+    assert {r[0] for r in rows} >= {"Interface", "Port", "DataType", "Connectivity"}
+    assert any(r[2] == "WARNING" for r in rows)
+    result = apply_patch(application.plan)
+    application.undo_result = result
+    application._buttons()
+    assert str(application.revert_button["state"]) == "normal"
+    revert_patch(result)
+    assert not (master / ADDITIONS_FILE).exists()

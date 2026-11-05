@@ -15,7 +15,7 @@ from arxml_parser import Dataset, PatcherError
 
 @dataclass(frozen=True)
 class FileState:
-    data: bytes
+    data: bytes | None
     mode: int
     atime_ns: int | None
     mtime_ns: int | None
@@ -66,6 +66,8 @@ def replace_file(path: Path, data: bytes) -> None:
 def _snapshot(path: Path) -> FileState:
     if path.is_symlink() or path.resolve() != path.absolute():
         raise PatcherError(f"Linked Master file is unsupported: {path}")
+    if not path.exists():
+        return FileState(None, 0, None, None)
     metadata = path.stat()
     data = path.read_bytes()
     after = path.stat()
@@ -90,6 +92,9 @@ def _require(path: Path, expected: FileState) -> None:
 
 
 def _write_state(path: Path, snapshot: FileState) -> None:
+    if snapshot.data is None:
+        path.unlink(missing_ok=True)
+        return
     replace_file(path, snapshot.data)
     path.chmod(snapshot.mode)
     if snapshot.mtime_ns is not None:
@@ -224,13 +229,21 @@ def commit_changes(plan, validated: Dataset, changed: set[Path], report: dict) -
         plan.source.assert_unchanged()
         originals = {file: _snapshot(master / file) for file in sorted(changed)}
         for file, snapshot in originals.items():
-            if snapshot.data != plan.master.documents[file].original:
+            expected = (
+                plan.master.documents[file].original if file in plan.master.documents else None
+            )
+            if snapshot.data != expected:
                 raise PatcherError(f"Master changed after scan: {file}")
         result.changed_files = tuple(originals)
         result.originals = originals
         result.current = dict(originals)
         targets = {
-            file: FileState(validated.documents[file].original, snapshot.mode, None, None)
+            file: FileState(
+                validated.documents[file].original,
+                snapshot.mode if snapshot.data is not None else 0o666,
+                None,
+                None,
+            )
             for file, snapshot in originals.items()
         }
         report.update(

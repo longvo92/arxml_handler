@@ -28,6 +28,17 @@ def real_data(tmp_path):
         target = safe_master / file
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(document.original)
+    # Make the opt-in scenario repeatable even when the supplied Master was already patched.
+    copied = Dataset.load(safe_master)
+    generated = Dataset.load(source)
+    for access in generated.objects_of("VARIABLE-ACCESS"):
+        target = copied.objects.get(access.path)
+        if target is not None:
+            target.node.getparent().remove(target.node)
+            copied.documents[target.file].tree.write(
+                str(safe_master / target.file), encoding="UTF-8", xml_declaration=True
+            )
+            break
     yield safe_master, source
     assert Dataset.load(original_master).manifest() == snapshot.manifest()
     assert Dataset.load(source).manifest() == source_before
@@ -92,6 +103,43 @@ def test_real_generated_definitions_all_three_features(real_data, tmp_path):
     assert all(plan.summary[k] > 0 for k in ["DataElement", "ComSpec", "RunnableAccess"])
     output = apply_patch(plan, os.getenv("AUTOSAR_XSD")).master_folder
     assert scan(output, source).summary["ADD"] == 0
+
+
+def test_real_architecture_import_and_revert(real_data):
+    master, source = real_data
+    generated = Dataset.load(source)
+    copied = Dataset.load(master)
+    port = next(
+        o
+        for o in generated.objects_of("R-PORT-PROTOTYPE")
+        if child(o.node, "REQUIRED-COM-SPECS") is not None
+    )
+    interface_path = value(port.node, "REQUIRED-INTERFACE-TREF")
+    interface = generated.objects[interface_path]
+    data = child(interface.node, "DATA-ELEMENTS")[0]
+    type_path = value(data, "TYPE-TREF")
+    connector = next(
+        o
+        for o in generated.objects_of("ASSEMBLY-SW-CONNECTOR")
+        if port.path in ET.tostring(o.node).decode()
+    )
+    changed = set()
+    for path in (port.path, interface_path, type_path, connector.path):
+        target = copied.objects[path]
+        target.node.getparent().remove(target.node)
+        changed.add(target.file)
+    for file in changed:
+        copied.documents[file].tree.write(
+            str(master / file), encoding="UTF-8", xml_declaration=True
+        )
+    before = Dataset.load(master).manifest()
+    plan = scan(master, source)
+    assert plan.valid, plan.report()
+    assert all(plan.summary[k] > 0 for k in ("Port", "Interface", "DataType", "Connector"))
+    result = apply_patch(plan, os.getenv("AUTOSAR_XSD"))
+    assert scan(master, source).summary["ADD"] == 0
+    revert_patch(result)
+    assert Dataset.load(master).manifest() == before
 
 
 def test_real_uuid_collision_and_dependency_regeneration(real_data, tmp_path):

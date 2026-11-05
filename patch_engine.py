@@ -32,6 +32,7 @@ def report_text(report: dict) -> str:
         "",
     ]
     lines.extend("ERROR: " + e for e in report["errors"])
+    lines.extend("WARNING: " + w for w in report.get("warnings", []))
     for row in report["records"]:
         if row["Action"] != "EXISTS":
             lines.append(
@@ -165,39 +166,54 @@ def apply_patch(plan: Plan, xsd: str | Path | None = None) -> PatchResult:
     patched = Dataset(plan.master.folder)
     for file, doc in plan.master.documents.items():
         patched._parse(file, doc.original)
+    for file, raw in plan.new_documents.items():
+        patched._parse(file, raw)
     patched.reindex()
     changed = set()
     inserted: list[tuple[ET._Element, ET._Element]] = []
     created: list[tuple[ET._Element, ET._Element]] = []
-    phase = {"DataElement": 0, "ComSpec": 1, "RunnableAccess": 2}
-    operations = sorted(plan.operations, key=lambda op: phase[op.record.Category])
+    from architecture import operation_parent
+
+    operations = plan.operations
     for op in operations:
-        target = patched.objects[op.parent_path]
-        container, was_created = _container(target.node, op.container)
+        parent = operation_parent(patched, op)
+        container, was_created = _container(parent, op.container)
         if was_created:
-            created.append((target.node, container))
+            created.append((parent, container))
         node = copy.deepcopy(op.source)
         _append(container, node)
+        if semantic(node) != semantic(op.source):
+            raise PatcherError(f"Copied definition changed: {op.record.ObjectPath}")
         inserted.append((container, node))
-        changed.add(target.file)
+        changed.add(op.target_file or Path(op.record.TargetFile))
+        patched.reindex()
     patched.reindex()
     if patched.errors:
         raise PatcherError("Post-patch indexing failed: " + "; ".join(patched.errors))
     if len(operations) != len(inserted):
         raise PatcherError("Inserted definition count does not match planned additions")
     for op, (_, node) in zip(operations, inserted):
-        if semantic(node) != semantic(op.source):
-            raise PatcherError(f"Copied definition changed: {op.record.ObjectPath}")
-        _, error, _ = check_dependencies(node, patched.objects, plan.source)
+        # Packages contain staged children and have no independent reference contract.
+        _, error, _ = (
+            check_dependencies(node, patched.objects, plan.source)
+            if op.record.Category not in {"Package", "Connector"}
+            else ([], None, False)
+        )
         if error:
             raise PatcherError(f"Post-patch reference validation failed: {error}")
+        if op.record.Category == "Connector":
+            from architecture import check_connector
+
+            error = check_connector(node, op.parent_path, patched.objects)
+            if error:
+                raise PatcherError(error)
         if op.record.Category == "RunnableAccess":
             error = check_access(
                 node, op.parent_path, ACCESS_CONTAINERS[op.container], patched.objects
             )
             if error:
                 raise PatcherError(error)
-        error = check_order(patched.objects[op.parent_path].node)
+        error = check_order(operation_parent(patched, op))
         if error:
             raise PatcherError(error)
     repeat = compare(patched, plan.source)
@@ -209,15 +225,17 @@ def apply_patch(plan: Plan, xsd: str | Path | None = None) -> PatchResult:
         file: Document(file, doc.original, copy.deepcopy(doc.tree))
         for file, doc in patched.documents.items()
     }
-    proof.reindex()
-    for op in reversed(operations):
-        target = proof.objects[op.parent_path]
-        container = child(target.node, op.container)
-        container.remove(container[-1])
-    for parent, container in reversed(created):
-        path = patched.paths[parent]
-        proof_parent = proof.objects[path].node
-        proof_parent.remove(child(proof_parent, tag(container)))
+    proof_nodes = {}
+    for file, doc in patched.documents.items():
+        proof_nodes.update(zip(doc.tree.iter(), proof.documents[file].tree.iter()))
+    for _, node in reversed(inserted):
+        copied = proof_nodes[node]
+        if copied.getparent() is not None:
+            copied.getparent().remove(copied)
+    for _, container in reversed(created):
+        copied = proof_nodes[container]
+        if copied.getparent() is not None:
+            copied.getparent().remove(copied)
     for file, doc in plan.master.documents.items():
         if semantic(proof.documents[file].tree.getroot()) != semantic(doc.tree.getroot()):
             raise PatcherError(f"Unrelated XML content changed in {file}")

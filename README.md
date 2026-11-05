@@ -47,6 +47,17 @@ requires scanning again before Apply.
 
 ## Supported changes
 
+- Import new S/R datatypes (application primitive/array/record and implementation)
+  and their reachable base types, computation methods, constraints, units,
+  physical dimensions, constants and address methods. Only dependencies needed
+  by processed S/R definitions are imported; unrelated datatypes are not synchronized.
+- Import a missing Sender-Receiver interface, including its complete definition.
+- Import an R-Port or P-Port into an existing component with the same AUTOSAR path/type.
+- Import relevant application/implementation datatype mappings declared by Source,
+  merging only required entries and adding references on existing behavior/composition owners.
+- Import Source assembly/delegation connectors when composition, instances,
+  endpoint direction, ownership and S/R interfaces are valid. Equivalent connections
+  under another name are reused; incompatible properties block the patch.
 - Add a missing `VARIABLE-DATA-PROTOTYPE` to an existing S/R interface.
 - Add a missing nonqueued/queued receiver/sender ComSpec on an existing R/P port.
 - Add a missing `VARIABLE-ACCESS` on an existing runnable, preserving its mode:
@@ -77,35 +88,53 @@ operation, source and target files, source XML node path, old/new UUID and reaso
 An empty list means no UUID reassignment was planned. ADD reasons include a count
 of reassigned UUIDs. UUID-only differences produce EXISTS and require no write.
 
-Datatypes, constants and their reachable reference dependencies must already exist
-in Master. If Source also defines a dependency, it must agree with Master.
-No interfaces, datatypes, constants, ports, components or runnables are created.
-No existing definition is updated, renamed or deleted; timing, events, symbols,
-connectors, implementation and generated C are left intact. Unrelated objects
+Missing supported dependencies are copied from Source. Dependencies outside the
+import allowlist must already exist in Master. If Source also defines a dependency,
+it must agree with Master. Missing/unsupported dependencies report their reference chain.
+No components, component instances or runnables are created. C/S, NV-Data and
+PR-Ports remain outside the import scope. No connections or datatype mappings are inferred.
+Existing definitions receive only the supported additions; existing nodes are not
+replaced, renamed or deleted. Timing, events, symbols, existing connectors,
+implementation and generated C are left intact. Unrelated objects
 are not synchronized. C/S and local-variable access are never added.
 
-Runnable accesses require a port mapped to an existing Sender-Receiver interface;
-NV-Data interfaces are outside scope even when accepted by the AUTOSAR XSD.
+Runnable accesses require a port mapped to a Sender-Receiver interface available
+in the planned Master; NV-Data interfaces are outside scope even when accepted by the AUTOSAR XSD.
 Unknown data access modes always block the patch, including when their access
 node matches Master. Unchanged accesses in the known read/write local-variable
 containers may coexist with the supported S/R changes.
 
 ## In-place updates, session Revert and validation
 
+Package-level additions go into the file that uniquely owns the package. New or
+split packages use `sr_patcher_additions.arxml` in the Master root, preserving
+AUTOSAR paths through package fragments. An existing additions file is parsed
+and extended, never replaced wholesale. Ports, mappings, accesses and connectors
+are inserted into their owner's file. Preview shows every destination before Apply.
+
 Only changed Master ARXML files are replaced. Other ARXML and generated artifacts
 such as C, headers and A2L retain their original bytes. Modified files are serialized as XML
 and can have minor serialization differences; existing XML content is verified
 semantically unchanged after removing the permitted additions.
 
-Patch order is data elements, ComSpecs, then runnable accesses. Validation checks
+Scan builds a virtual Master containing planned architecture/dependency additions,
+then plans missing data elements, ComSpecs and runnable accesses against that view.
+References may point forward or form cycles; shared definitions are imported once.
+Validation checks
 identity collisions, new references and DEST types, datatype/value dependencies,
 port direction and interface membership, verified container order, unrelated
 content preservation, reparsing, and a second scan with `ADD = 0`. All checks,
 including optional XSD validation, finish in memory before writing Master.
 
+New ports without Source connectors produce nonblocking connectivity warnings in
+GUI, CLI and exported reports. A Source set without composition files can still
+supply ports; review those connections manually in the downstream authoring tool.
+
 Apply retains the original bytes, file modes and modification timestamps of changed
 files in RAM. **Undo Last Update** restores those exact bytes and **Date modified**
-values using nanosecond timestamps, then verifies them. File creation timestamps
+values using nanosecond timestamps, then verifies them. Newly created files are
+removed by Undo only while they still match the expected state; external edits
+block restoration/deletion. File creation timestamps
 and filesystem change logs follow operating-system behavior.
 
 The GUI retains one undo result for the latest successful Apply. Scanning again or
@@ -133,7 +162,11 @@ same recovery result through `TransactionError.result`.
 Reports are saved explicitly through **Save Report** or CLI `--report`. Apply and
 Revert keep their reports in memory until exported. JSON reports include the actual
 operation outcome, undo storage mode, original modification times and validation
-results. `revert_available` describes availability in the exporting process only.
+results. Reports also include `warnings` and `created_files`; summaries add
+`DataType`, `Dependency`, `DataTypeMapping`, `Interface`, `Port`, `Connector` and
+`Package` counts. `PatchResult.originals` may contain `FileState.data = None`
+for a file that did not exist before Apply. `revert_available` describes availability
+in the exporting process only.
 After Revert, `post_revert_validation` records byte/timestamp restoration and
 `apply_xsd_validated` records the earlier Apply's XSD result.
 

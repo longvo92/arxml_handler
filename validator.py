@@ -92,6 +92,9 @@ def check_dependencies(
             return visit(nested) if nested is not None else f"Port has no interface: {path}"
         if kind == "SENDER-RECEIVER-INTERFACE":
             return None
+        if kind == "DATA-TYPE-MAPPING-SET":
+            # Mapping sets are merged entry by entry, not compared as whole Source sets.
+            return None
         src = source.objects.get(path)
         if src is not None and semantic(src.node, ignore_uuid=True) != semantic(
             obj.node, ignore_uuid=True

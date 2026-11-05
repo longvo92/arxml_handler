@@ -114,16 +114,17 @@ def test_invalid_port_interface_dest_blocks_comspec(inputs, side):
     assert not output.exists()
 
 
-def test_no_new_interface_is_created(inputs):
+def test_new_interface_is_created(inputs):
     master, source, output = inputs(source_elements=element())
     file = source / "different-names" / "source.ARXML"
     file.write_text(
         file.read_text().replace("<SHORT-NAME>If</SHORT-NAME>", "<SHORT-NAME>NewIf</SHORT-NAME>")
     )
     plan = scan(master, source)
-    assert plan.summary["UNSUPPORTED"] == 1
-    with pytest.raises(PatcherError):
-        apply_patch(plan)
+    assert plan.valid, plan.report()
+    assert plan.summary["Interface"] == 1
+    apply_patch(plan)
+    assert scan(master, source).summary["ADD"] == 0
 
 
 def test_unknown_parent_child_blocks_guessed_order(inputs):
