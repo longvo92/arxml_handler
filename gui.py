@@ -352,8 +352,13 @@ class Application(ttk.Frame):
         for error in self.plan.errors:
             row = self.tree.insert("", "end", values=("Input", "", "ERROR", error), tags=("ERROR",))
             self.rows[row] = error
+        for warning in self.plan.warnings:
+            row = self.tree.insert("", "end", values=("Connectivity", "", "WARNING", warning))
+            self.rows[row] = warning
         s = self.plan.summary
         self.summary.set(
+            f"New Types: {s['DataType']}    Interfaces: {s['Interface']}    Ports: {s['Port']}    "
+            f"Connectors: {s['Connector']}    Warnings: {len(self.plan.warnings)}    "
             f"New Data Elements: {s['DataElement']}    New ComSpecs: {s['ComSpec']}    "
             f"New Access Points: {s['RunnableAccess']}    Conflicts: {s['CONFLICT']}    "
             f"Unsupported: {s['UNSUPPORTED']}    Already present: {s['EXISTS']}    "

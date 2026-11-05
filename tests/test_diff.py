@@ -71,15 +71,17 @@ def test_tc10_missing_runnable(inputs):
     assert scan(master, source).summary["UNSUPPORTED"] == 1
 
 
-def test_tc11_missing_port(inputs):
+def test_tc11_new_ports(inputs):
     master, source, _ = inputs(
         master_elements=element(),
         source_elements=element(),
         master_component=component(ports=False),
         source_component=component(rcom=comspec(), accesses=access()),
     )
-    assert not scan(master, source).valid
-    assert scan(master, source).summary["UNSUPPORTED"] >= 1
+    plan = scan(master, source)
+    assert plan.valid, plan.report()
+    assert plan.summary["Port"] == 2
+    assert plan.warnings
 
 
 def test_tc12_missing_type(inputs):

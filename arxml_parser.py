@@ -86,7 +86,9 @@ def semantic(node: ET._Element, *, ignore_uuid: bool = False) -> tuple:
 
 
 def references(node: ET._Element) -> list[ET._Element]:
-    return [n for n in node.iter() if tag(n).endswith(("-REF", "-TREF"))]
+    return [
+        n for n in node.iter() if tag(n).endswith(("-REF", "-TREF")) and not any(tag(c) for c in n)
+    ]
 
 
 def xml_parser() -> ET.XMLParser:

@@ -1,4 +1,4 @@
-"""Plan the three permitted additions; never mutate either input dataset."""
+"""Plan additive S/R architecture and leaf changes without mutating either input."""
 
 from __future__ import annotations
 
@@ -43,6 +43,7 @@ class Operation:
     source: ET._Element
     parent_path: str
     container: str
+    target_file: Path | None = None
 
 
 @dataclass
@@ -64,6 +65,8 @@ class Plan:
     operations: list[Operation] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     uuid_changes: list[UuidChange] = field(default_factory=list)
+    new_documents: dict[Path, bytes] = field(default_factory=dict)
+    warnings: list[str] = field(default_factory=list)
 
     @property
     def valid(self) -> bool:
@@ -78,7 +81,18 @@ class Plan:
         result.update(
             {
                 k: sum(r.Category == k and r.Action == "ADD" for r in self.records)
-                for k in ["DataElement", "ComSpec", "RunnableAccess"]
+                for k in [
+                    "DataElement",
+                    "ComSpec",
+                    "RunnableAccess",
+                    "DataType",
+                    "Dependency",
+                    "DataTypeMapping",
+                    "Interface",
+                    "Port",
+                    "Connector",
+                    "Package",
+                ]
             }
         )
         result["Errors"] = len(self.errors)
@@ -100,6 +114,8 @@ class Plan:
             ),
             "errors": self.errors + ([error] if error else []),
             "records": [asdict(r) for r in self.records],
+            "warnings": self.warnings,
+            "created_files": [p.as_posix() for p in self.new_documents],
             "uuid_changes": [asdict(change) for change in self.uuid_changes],
             "input_sha256": {"master": self.master.manifest(), "source": self.source.manifest()},
         }
@@ -112,6 +128,12 @@ def scan(master_folder: str | Path, source_folder: str | Path) -> Plan:
 
 
 def compare(master: Dataset, source: Dataset) -> Plan:
+    from architecture import plan_architecture
+
+    return plan_architecture(master, source, _compare_existing)
+
+
+def _compare_existing(master: Dataset, source: Dataset) -> Plan:
     plan = Plan(master, source)
     plan.errors = [f"Master: {e}" for e in master.errors] + [f"Source: {e}" for e in source.errors]
     if master.versions != source.versions:
